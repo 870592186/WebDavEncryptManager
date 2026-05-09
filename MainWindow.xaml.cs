@@ -212,7 +212,7 @@ namespace WebDavEncryptManager
             foreach (FileItem selected in ListLocal.SelectedItems)
             {
                 if (selected.IsDirectory) continue;
-                var payload = new { localPath = selected.FullPath, remotePath = currentRemotePath.TrimEnd('/') + "/" + selected.Name, webdavUrl = currentConfig.WebDavUrl, username = currentConfig.Username, password = currentConfig.Password, customKey = TxtCustomKey.Text.Trim() };
+                var payload = new { localPath = selected.FullPath, remotePath = currentRemotePath.TrimEnd('/') + "/" + selected.Name, webdavUrl = currentConfig.WebDavUrl, username = currentConfig.Username, password = currentConfig.Password, customKey = ActualCustomKey };
                 await httpClient.PostAsync($"{GoEngineApiUrl}/api/upload", new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json"));
             }
             SetProgress(false, "上传完毕");
@@ -241,10 +241,10 @@ namespace WebDavEncryptManager
 
             if (Array.Exists(vids, x => x == ext))
             {
-                string url = $"{GoEngineApiUrl}/api/stream?path={Uri.EscapeDataString(item.FullPath)}&url={Uri.EscapeDataString(currentConfig.WebDavUrl)}&user={Uri.EscapeDataString(currentConfig.Username)}&pass={Uri.EscapeDataString(currentConfig.Password)}&key={Uri.EscapeDataString(TxtCustomKey.Text.Trim())}";
+                string url = $"{GoEngineApiUrl}/api/stream?path={Uri.EscapeDataString(item.FullPath)}&url={Uri.EscapeDataString(currentConfig.WebDavUrl)}&user={Uri.EscapeDataString(currentConfig.Username)}&pass={Uri.EscapeDataString(currentConfig.Password)}&key={Uri.EscapeDataString(ActualCustomKey)}";
                 Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
                 SetProgress(false, "就绪");
-            }
+            }   
             else
             {
                 await DownloadAndOpenFile(item);
@@ -279,7 +279,7 @@ namespace WebDavEncryptManager
                     webdavUrl = currentConfig.WebDavUrl,
                     username = currentConfig.Username,
                     password = currentConfig.Password,
-                    customKey = TxtCustomKey.Text.Trim()
+                    customKey = ActualCustomKey
                 };
 
                 var resp = await httpClient.PostAsync($"{GoEngineApiUrl}/api/download", new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json"));
@@ -422,5 +422,40 @@ namespace WebDavEncryptManager
                 SetProgress(false, "就绪");
             }
         }
+
+        // 在 MainWindow 类中定义一个变量保存最终的密钥
+        private string ActualCustomKey = "";
+
+        // 处理确定/修改按钮的点击
+        private void BtnConfirmKey_Click(object sender, RoutedEventArgs e)
+        {
+            if (TxtCustomKeyVisible.Visibility == Visibility.Visible)
+            {
+                // 动作：锁定并隐藏
+                string key = TxtCustomKeyVisible.Text.Trim();
+                if (string.IsNullOrEmpty(key)) return;
+
+                ActualCustomKey = key;
+                TxtCustomKeyHidden.Password = key; // 同步给密码框显示星号
+
+                TxtCustomKeyVisible.Visibility = Visibility.Collapsed;
+                TxtCustomKeyHidden.Visibility = Visibility.Visible;
+                BtnConfirmKey.Content = "修改";
+            }
+            else
+            {
+                // 动作：解锁并修改
+                TxtCustomKeyVisible.Text = ActualCustomKey;
+
+                TxtCustomKeyHidden.Visibility = Visibility.Collapsed;
+                TxtCustomKeyVisible.Visibility = Visibility.Visible;
+                BtnConfirmKey.Content = "确定";
+            }
+        }
+
+        // ⚠️ 注意：在你之前写的 BtnUpload_Click、HandleRemoteItem 等发起网络请求的地方，
+        // 记得把 payload 里的 customKey = TxtCustomKey.Text.Trim() 
+        // 替换为 customKey = ActualCustomKey
+
     }
 }
