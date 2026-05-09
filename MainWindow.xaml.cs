@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic; // 🌟 确保引入了泛型集合
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -13,19 +14,26 @@ using System.Windows.Input;
 using System.Xml.Linq;
 using Microsoft.VisualBasic;
 using Microsoft.VisualBasic.FileIO;
+using System.Collections.ObjectModel;
 
 namespace WebDavEncryptManager
 {
     public partial class MainWindow : Window
     {
-        private static readonly HttpClient httpClient = new HttpClient();
+        private static readonly HttpClient httpClient = new HttpClient { Timeout = System.Threading.Timeout.InfiniteTimeSpan };
         private AppConfig currentConfig = new AppConfig();
+        private static readonly System.Threading.SemaphoreSlim _downloadSemaphore = new System.Threading.SemaphoreSlim(5, 5);
+        private static readonly System.Threading.SemaphoreSlim _uploadSemaphore = new System.Threading.SemaphoreSlim(5, 5);
+        private System.Windows.Threading.DispatcherTimer _refreshDebounceTimer;
         private string currentLocalPath = "";
         private string currentRemotePath = "/";
         private FileSystemWatcher _localWatcher;
         private readonly string GoEngineApiUrl = "http://127.0.0.1:8888";
         private System.Windows.Threading.DispatcherTimer _progressTimer;
         private string _currentTaskId;
+        private ObservableCollection<TransferTask> GlobalTasks = new ObservableCollection<TransferTask>();
+        private TransferWindow _transferWindow;
+
         // 用于接收 Go 返回的进度数据
         public class TaskProgress
         {
@@ -40,7 +48,21 @@ namespace WebDavEncryptManager
             InitializeComponent();
             InitDriveList();
 
-            // 读取硬件绑定的加密配置
+            // 启动全局唯一守护定时器
+            _progressTimer = new System.Windows.Threading.DispatcherTimer();
+            _progressTimer.Interval = TimeSpan.FromSeconds(1);
+            _progressTimer.Tick += GlobalProgressTimer_Tick;
+            _progressTimer.Start();
+
+            // 🌟 初始化节流定时器 (设置为 1.5 秒延迟)
+            _refreshDebounceTimer = new System.Windows.Threading.DispatcherTimer();
+            _refreshDebounceTimer.Interval = TimeSpan.FromSeconds(1.5);
+            _refreshDebounceTimer.Tick += (s, e) =>
+            {
+                _refreshDebounceTimer.Stop(); // 触发一次后立刻停止
+                _ = LoadRemoteFiles(currentRemotePath); // 执行真正的刷新
+            };
+
             currentConfig = HardwareCryptoHelper.LoadEncryptedConfig("config.dat");
             if (!string.IsNullOrEmpty(currentConfig.Username))
                 _ = LoadRemoteFiles("/");
@@ -110,6 +132,64 @@ namespace WebDavEncryptManager
             if (ListLocal.SelectedItem is FileItem item && item.IsDirectory) LoadLocalFiles(item.FullPath);
         }
 
+        // 打开传输列表
+        private void BtnTransferList_Click(object sender, RoutedEventArgs e)
+        {
+            // 懒加载核心逻辑：如果窗口还没被创建过，我们才去创建它
+            if (_transferWindow == null)
+            {
+                _transferWindow = new TransferWindow(GlobalTasks);
+                _transferWindow.Owner = this;
+            }
+
+            // 显示并激活窗口
+            _transferWindow.Show();
+            _transferWindow.Activate();
+        }
+
+        // 全局唯一轮询：遍历 GlobalTasks 更新进度
+        private async void GlobalProgressTimer_Tick(object sender, EventArgs e)
+        {
+            var activeTasks = GlobalTasks.Where(t => !t.IsCompleted).ToList();
+
+            // 主界面底部状态栏只显示“第一个正在运行”的任务概况
+            if (activeTasks.Count == 0)
+            {
+                PrgTask.Value = 0;
+                TxtStatus.Text = "就绪";
+                TxtPercentage.Text = "";
+            }
+            else
+            {
+                var firstTask = activeTasks.First();
+                TxtStatus.Text = $"正在处理: {firstTask.FileName} (共 {activeTasks.Count} 个任务)";
+                PrgTask.Value = firstTask.Percentage;
+                TxtPercentage.Text = $"{firstTask.Percentage:F1}%";
+            }
+
+            // 后台向 Go 请求每个任务的进度并更新
+            foreach (var task in activeTasks)
+            {
+                try
+                {
+                    var resp = await httpClient.GetStringAsync($"{GoEngineApiUrl}/api/progress?id={task.TaskId}");
+                    var progress = JsonSerializer.Deserialize<TaskProgress>(resp);
+                    if (progress != null)
+                    {
+                        task.Percentage = progress.percentage;
+                        task.StatusText = $"{progress.percentage:F1}% ({progress.current / 1024 / 1024} MB / {progress.total / 1024 / 1024} MB)";
+
+                        if (progress.percentage >= 100)
+                        {
+                            task.IsCompleted = true;
+                            task.StatusText = "✅ 已完成";
+                        }
+                    }
+                }
+                catch { /* 忽略瞬时网络错误 */ }
+            }
+        }
+
         private void MenuLocalOpen_Click(object sender, RoutedEventArgs e)
         {
             foreach (FileItem item in ListLocal.SelectedItems)
@@ -153,7 +233,7 @@ namespace WebDavEncryptManager
 
             try
             {
-                // 🌟 使用 Uri 确保带有中文的路径被正确编码，解决打不开中文文件夹的问题
+                // 使用 Uri 确保带有中文的路径被正确编码
                 string davBase = currentConfig.WebDavUrl.TrimEnd('/');
                 Uri baseUri = new Uri(davBase + "/");
                 Uri requestUri = new Uri(baseUri, path.TrimStart('/'));
@@ -215,64 +295,163 @@ namespace WebDavEncryptManager
         // ==========================================
         // ⚙️ 核心 API 交互 (上传、下载、播放、重命名、删除)
         // ==========================================
-        private async void BtnUpload_Click(object sender, RoutedEventArgs e)
+        private void BtnUpload_Click(object sender, RoutedEventArgs e)
         {
             if (string.IsNullOrEmpty(currentConfig.Username)) { MessageBox.Show("请先配置 WebDAV"); return; }
+            if (ListLocal.SelectedItems.Count == 0) return;
 
-            foreach (FileItem selected in ListLocal.SelectedItems)
+            string targetRemoteDir = currentRemotePath;
+            bool overwriteConflict = CmbConflictPolicy.SelectedIndex == 1;
+
+            foreach (FileItem selected in ListLocal.SelectedItems.Cast<FileItem>().ToList())
             {
-                if (selected.IsDirectory) continue;
-
-                // 🌟 1. 生成独一无二的 TaskID
-                string taskId = Guid.NewGuid().ToString();
-
-                // 🌟 2. 启动进度追踪器
-                StartProgressTracker(taskId, $"正在加密上传 {selected.Name}...");
-
-                try
+                if (selected.IsDirectory)
                 {
-                    var payload = new
-                    {
-                        taskId = taskId, // 发送给 Go
-                        localPath = selected.FullPath,
-                        remotePath = currentRemotePath.TrimEnd('/') + "/" + selected.Name,
-                        webdavUrl = currentConfig.WebDavUrl,
-                        username = currentConfig.Username,
-                        password = currentConfig.Password,
-                        customKey = TxtCustomKeyVisible.Text.Trim() // 使用前面确定的密钥变量
-                    };
-
-                    var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
-                    await httpClient.PostAsync($"{GoEngineApiUrl}/api/upload", content);
+                    _ = UploadFolderRecursive(selected.FullPath, targetRemoteDir, selected.Name, overwriteConflict);
                 }
-                finally
+                else
                 {
-                    // 🌟 3. 任务结束（无论成功或失败），停止追踪器
-                    StopProgressTracker();
+                    bool isExistRemote = ListRemote.Items.Cast<FileItem>().Any(f => f.Name == selected.Name);
+                    if (isExistRemote && !overwriteConflict)
+                    {
+                        GlobalTasks.Add(new TransferTask { TaskId = Guid.NewGuid().ToString(), FileName = selected.Name, IsUpload = true, Percentage = 100, StatusText = "⏭️ 已跳过 (同名)", IsCompleted = true });
+                        continue;
+                    }
+
+                    _ = EnqueueUploadTask(selected.Name, selected.FullPath, targetRemoteDir);
                 }
             }
-            await LoadRemoteFiles(currentRemotePath); // 刷新列表
         }
+
+        private async Task EnqueueUploadTask(string fileName, string localFullPath, string targetRemoteDir)
+        {
+            string taskId = Guid.NewGuid().ToString();
+            string remoteFullPath = targetRemoteDir.TrimEnd('/') + "/" + fileName;
+
+            var newTask = new TransferTask { TaskId = taskId, FileName = fileName, IsUpload = true, Percentage = 0, StatusText = "排队中..." };
+            Application.Current.Dispatcher.Invoke(() => GlobalTasks.Add(newTask));
+
+            await _uploadSemaphore.WaitAsync();
+
+            try
+            {
+                newTask.StatusText = "准备上传...";
+                var payload = new { taskId = taskId, localPath = localFullPath, remotePath = remoteFullPath, webdavUrl = currentConfig.WebDavUrl, username = currentConfig.Username, password = currentConfig.Password, customKey = TxtCustomKeyVisible.Text.Trim() };
+                var content = new StringContent(System.Text.Json.JsonSerializer.Serialize(payload), System.Text.Encoding.UTF8, "application/json");
+
+                var resp = await httpClient.PostAsync($"{GoEngineApiUrl}/api/upload", content);
+                if (!resp.IsSuccessStatusCode) newTask.StatusText = "❌ 上传失败";
+            }
+            catch (Exception) { newTask.StatusText = "❌ 发生异常"; }
+            finally
+            {
+                _uploadSemaphore.Release();
+
+                if (!newTask.StatusText.Contains("失败") && !newTask.StatusText.Contains("异常"))
+                {
+                    newTask.Percentage = 100;
+                    newTask.StatusText = "✅ 已完成";
+                }
+                newTask.IsCompleted = true;
+
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    _refreshDebounceTimer.Stop();
+                    _refreshDebounceTimer.Start();
+                });
+            }
+        }
+
+        private async Task CreateRemoteDirectory(string remotePath)
+        {
+            try
+            {
+                string davBase = currentConfig.WebDavUrl.TrimEnd('/');
+                Uri baseUri = new Uri(davBase + "/");
+                Uri requestUri = new Uri(baseUri, remotePath.TrimStart('/'));
+
+                var req = new HttpRequestMessage(new HttpMethod("MKCOL"), requestUri.AbsoluteUri);
+                req.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{currentConfig.Username}:{currentConfig.Password}")));
+
+                await httpClient.SendAsync(req);
+            }
+            catch { }
+        }
+
+        private async Task UploadFolderRecursive(string localDirPath, string targetRemoteDir, string relativeDirName, bool overwriteConflict)
+        {
+            try
+            {
+                string currentRemoteFolder = targetRemoteDir.TrimEnd('/') + "/" + relativeDirName;
+                await CreateRemoteDirectory(currentRemoteFolder);
+
+                HashSet<string> existingFiles = new HashSet<string>();
+                if (!overwriteConflict)
+                {
+                    try
+                    {
+                        string davBase = currentConfig.WebDavUrl.TrimEnd('/');
+                        Uri baseUri = new Uri(davBase + "/");
+                        Uri requestUri = new Uri(baseUri, currentRemoteFolder.TrimStart('/'));
+
+                        var req = new HttpRequestMessage(new HttpMethod("PROPFIND"), requestUri.AbsoluteUri);
+                        req.Headers.Add("Depth", "1");
+                        req.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{currentConfig.Username}:{currentConfig.Password}")));
+
+                        var resp = await httpClient.SendAsync(req);
+                        if (resp.IsSuccessStatusCode || (int)resp.StatusCode == 207)
+                        {
+                            string xml = await resp.Content.ReadAsStringAsync();
+                            XDocument doc = XDocument.Parse(xml);
+                            XNamespace ns = "DAV:";
+                            foreach (var res in doc.Descendants(ns + "response"))
+                            {
+                                string href = Uri.UnescapeDataString(res.Element(ns + "href")?.Value ?? "");
+                                string itemName = href.TrimEnd('/').Split('/').Last();
+                                bool isDir = res.Descendants(ns + "collection").Any();
+                                if (!isDir && !string.IsNullOrEmpty(itemName))
+                                {
+                                    existingFiles.Add(itemName);
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
+                string[] files = Directory.GetFiles(localDirPath);
+                foreach (string file in files)
+                {
+                    string fileName = Path.GetFileName(file);
+                    if (!overwriteConflict && existingFiles.Contains(fileName))
+                    {
+                        Application.Current.Dispatcher.Invoke(() => {
+                            GlobalTasks.Add(new TransferTask { TaskId = Guid.NewGuid().ToString(), FileName = fileName, IsUpload = true, Percentage = 100, StatusText = "⏭️ 已跳过 (同名)", IsCompleted = true });
+                        });
+                        continue;
+                    }
+                    _ = EnqueueUploadTask(fileName, file, currentRemoteFolder);
+                }
+
+                string[] subDirs = Directory.GetDirectories(localDirPath);
+                foreach (string subDir in subDirs)
+                {
+                    string dirName = Path.GetFileName(subDir);
+                    await UploadFolderRecursive(subDir, currentRemoteFolder, dirName, overwriteConflict);
+                }
+            }
+            catch (Exception ex)
+            {
+                Application.Current.Dispatcher.Invoke(() => {
+                    MessageBox.Show($"读取本地文件夹 {localDirPath} 失败: {ex.Message}");
+                });
+            }
+        }
+
 
         private void ListRemote_MouseDoubleClick(object sender, MouseButtonEventArgs e) { if (ListRemote.SelectedItem is FileItem item) HandleRemoteItem(item); }
         private void MenuRemoteOpen_Click(object sender, RoutedEventArgs e) { if (ListRemote.SelectedItem is FileItem item) HandleRemoteItem(item); }
 
-        // 🌟 新增缺失的下载菜单点击事件
-        // ==========================================
-        // 核心拆分 1：右键下载菜单事件
-        // ==========================================
-        private async void MenuRemoteDownload_Click(object sender, RoutedEventArgs e)
-        {
-            foreach (FileItem item in ListRemote.SelectedItems)
-            {
-                // 触发正式下载
-                if (!item.IsDirectory) await DownloadRemoteFile(item);
-            }
-        }
-
-        // ==========================================
-        // 核心拆分 2：双击/打开菜单事件路由
-        // ==========================================
         private async void HandleRemoteItem(FileItem item)
         {
             if (item.IsDirectory) { await LoadRemoteFiles(item.FullPath); return; }
@@ -283,34 +462,27 @@ namespace WebDavEncryptManager
 
             if (Array.Exists(vids, x => x == ext))
             {
-                // 视频文件走流式播放
                 string url = $"{GoEngineApiUrl}/api/stream?path={Uri.EscapeDataString(item.FullPath)}&url={Uri.EscapeDataString(currentConfig.WebDavUrl)}&user={Uri.EscapeDataString(currentConfig.Username)}&pass={Uri.EscapeDataString(currentConfig.Password)}&key={Uri.EscapeDataString(ActualCustomKey)}";
                 Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
                 SetProgress(false, "就绪");
             }
             else
             {
-                // 🌟 修复：非视频文件，走临时预览逻辑
                 await PreviewRemoteFile(item);
             }
         }
 
-        // ==========================================
-        // 核心拆分 3：临时预览逻辑 (解密到 Temp 目录并直接打开)
-        // ==========================================
         private async Task PreviewRemoteFile(FileItem item)
         {
             SetProgress(true, $"正在准备预览 {item.Name}...");
             try
             {
-                // 使用系统临时文件夹
                 string tempPath = Path.Combine(Path.GetTempPath(), item.Name);
                 var payload = new { localPath = tempPath, remotePath = item.FullPath, webdavUrl = currentConfig.WebDavUrl, username = currentConfig.Username, password = currentConfig.Password, customKey = ActualCustomKey };
                 var resp = await httpClient.PostAsync($"{GoEngineApiUrl}/api/download", new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json"));
 
                 if (resp.IsSuccessStatusCode)
                 {
-                    // 预览成功后，直接运行该文件
                     Process.Start(new ProcessStartInfo { FileName = tempPath, UseShellExecute = true });
                 }
                 else MessageBox.Show("解密预览失败！");
@@ -319,81 +491,217 @@ namespace WebDavEncryptManager
             finally { SetProgress(false, "就绪"); }
         }
 
-        // ==========================================
-        // 核心拆分 4：正式下载逻辑 (解密到 Downloads 目录并打开文件夹)
-        // ==========================================
-        // ==========================================
-        // 正式下载逻辑 (解密到 Downloads 目录并打开文件夹)
-        // ==========================================
-        private async Task DownloadRemoteFile(FileItem item)
+        private void MenuRemoteDownload_Click(object sender, RoutedEventArgs e)
         {
-            // 🌟 1. 为本次下载生成独一无二的 TaskID
-            string taskId = Guid.NewGuid().ToString();
+            if (ListRemote.SelectedItems.Count == 0) return;
 
-            // 🌟 2. 启动进度追踪器 (替代原来的 SetProgress)
-            StartProgressTracker(taskId, $"正在下载解密 {item.Name}...");
+            string userProfilePath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            string baseDownloadsFolder = Path.Combine(userProfilePath, "Downloads");
 
-            try
+            foreach (FileItem item in ListRemote.SelectedItems.Cast<FileItem>().ToList())
             {
-                // 获取系统“下载”文件夹
-                string userProfilePath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-                string downloadsFolder = Path.Combine(userProfilePath, "Downloads");
-                if (!Directory.Exists(downloadsFolder)) Directory.CreateDirectory(downloadsFolder);
-
-                string finalSavePath = Path.Combine(downloadsFolder, item.Name);
-
-                // 🌟 3. 在发给 Go 引擎的 JSON 数据中加入 taskId
-                var payload = new
+                if (item.IsDirectory)
                 {
-                    taskId = taskId, // 发送给 Go 用于绑定进度
-                    localPath = finalSavePath,
-                    remotePath = item.FullPath,
-                    webdavUrl = currentConfig.WebDavUrl,
-                    username = currentConfig.Username,
-                    password = currentConfig.Password,
-                    customKey = TxtCustomKeyVisible.Text.Trim() // 确保使用正确的密钥变量
-                };
-
-                var resp = await httpClient.PostAsync($"{GoEngineApiUrl}/api/download", new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json"));
-
-                if (resp.IsSuccessStatusCode)
-                {
-                    // 下载成功后，打开资源管理器并高亮选中文件
-                    Process.Start("explorer.exe", $"/select,\"{finalSavePath}\"");
+                    _ = DownloadFolderRecursive(item.FullPath, item.Name, baseDownloadsFolder);
                 }
                 else
                 {
-                    MessageBox.Show("解密下载失败！请检查网络或后端引擎。");
+                    _ = EnqueueDownloadTask(item, "", baseDownloadsFolder);
+                }
+            }
+        }
+
+        private async Task DownloadFolderRecursive(string remoteDirPath, string relativeDir, string baseLocalFolder)
+        {
+            try
+            {
+                string davBase = currentConfig.WebDavUrl.TrimEnd('/');
+                Uri baseUri = new Uri(davBase + "/");
+                Uri requestUri = new Uri(baseUri, remoteDirPath.TrimStart('/'));
+
+                var req = new HttpRequestMessage(new HttpMethod("PROPFIND"), requestUri.AbsoluteUri);
+                req.Headers.Add("Depth", "1");
+                req.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{currentConfig.Username}:{currentConfig.Password}")));
+
+                var resp = await httpClient.SendAsync(req);
+                if (resp.IsSuccessStatusCode || (int)resp.StatusCode == 207)
+                {
+                    string xml = await resp.Content.ReadAsStringAsync();
+                    XDocument doc = XDocument.Parse(xml);
+                    XNamespace ns = "DAV:";
+
+                    foreach (var res in doc.Descendants(ns + "response"))
+                    {
+                        string href = Uri.UnescapeDataString(res.Element(ns + "href")?.Value ?? "");
+                        string davAbsolutePath = new Uri(currentConfig.WebDavUrl).AbsolutePath;
+                        string relPath = href.Substring(href.IndexOf(davAbsolutePath) + davAbsolutePath.Length);
+
+                        if (relPath.TrimEnd('/') == remoteDirPath.TrimEnd('/')) continue;
+
+                        string itemName = relPath.TrimEnd('/').Split('/').Last();
+                        bool isDir = res.Descendants(ns + "collection").Any();
+
+                        long sz = 0;
+                        var lenEl = res.Descendants(ns + "getcontentlength").FirstOrDefault();
+                        if (lenEl != null) long.TryParse(lenEl.Value, out sz);
+
+                        FileItem currentItem = new FileItem
+                        {
+                            Name = itemName,
+                            FullPath = relPath,
+                            IsDirectory = isDir,
+                            Size = sz
+                        };
+
+                        if (isDir)
+                        {
+                            await DownloadFolderRecursive(relPath, relativeDir + "/" + itemName, baseLocalFolder);
+                        }
+                        else
+                        {
+                            _ = EnqueueDownloadTask(currentItem, relativeDir, baseLocalFolder);
+                        }
+                    }
                 }
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"下载异常: {ex.Message}");
-            }
-            finally
-            {
-                // 🌟 4. 任务结束（无论成功或失败），停止追踪器并恢复 UI
-                StopProgressTracker();
+                Application.Current.Dispatcher.Invoke(() => {
+                    MessageBox.Show($"解析文件夹 {remoteDirPath} 失败: {ex.Message}");
+                });
             }
         }
 
-        // ==========================================
-        // 🌟 新增/恢复的右键菜单功能
-        // ==========================================
+        // 🌟 终极修复版 EnqueueDownloadTask
+        private async Task EnqueueDownloadTask(FileItem remoteItem, string relativeLocalDir, string baseDownloadsFolder)
+        {
+            string fileName = remoteItem.Name;
+            string remotePath = remoteItem.FullPath;
+            long remoteSize = remoteItem.Size; // 云端真实大小
 
-        // 左侧：右键加密上传（直接调用之前写好的 BtnUpload_Click 逻辑）
+            string targetFolder = string.IsNullOrEmpty(relativeLocalDir)
+                ? baseDownloadsFolder
+                : Path.Combine(baseDownloadsFolder, relativeLocalDir.Replace("/", "\\"));
+            string finalSavePath = Path.Combine(targetFolder, fileName);
+
+            bool overwritePolicy = false;
+            Application.Current.Dispatcher.Invoke(() => { overwritePolicy = CmbConflictPolicy.SelectedIndex == 1; });
+
+            long offset = 0;
+            bool needDownload = true;
+
+            if (File.Exists(finalSavePath))
+            {
+                FileInfo fi = new FileInfo(finalSavePath);
+                long localSize = fi.Length;
+
+                // 🌟 核心突破点 1：计算本地应该达到的“完美大小”
+                long expectedSize = remoteSize;
+                // 128 是你的加密文件头的固定大小。如果是加密状态，解密后的文件必须比云端小 128 字节
+                if (!string.IsNullOrEmpty(ActualCustomKey) && remoteSize >= 128)
+                {
+                    expectedSize = remoteSize - 128;
+                }
+
+                if (overwritePolicy)
+                {
+                    // 🌟 核心突破点 2：只要用户选了“覆盖”，不管下没下完，直接咔嚓删掉从 0 开始
+                    try { File.Delete(finalSavePath); } catch { }
+                    offset = 0;
+                    needDownload = true;
+                }
+                else
+                {
+                    // 🌟 核心突破点 3：选了“跳过/断点续传”时的精准识别
+                    if (localSize >= expectedSize)
+                    {
+                        // 真的下完了，跳过它！
+                        Application.Current.Dispatcher.Invoke(() =>
+                        {
+                            GlobalTasks.Add(new TransferTask
+                            {
+                                TaskId = Guid.NewGuid().ToString(),
+                                FileName = fileName,
+                                IsUpload = false,
+                                Percentage = 100,
+                                StatusText = "⏭️ 已跳过 (已完成)",
+                                IsCompleted = true
+                            });
+                        });
+                        return;
+                    }
+                    else
+                    {
+                        // 下了一半，开启续传！
+                        offset = localSize;
+                        needDownload = true;
+                    }
+                }
+            }
+
+            if (!needDownload) return;
+
+            string taskId = Guid.NewGuid().ToString();
+            var newTask = new TransferTask
+            {
+                TaskId = taskId,
+                FileName = string.IsNullOrEmpty(relativeLocalDir) ? fileName : $"{relativeLocalDir}/{fileName}",
+                IsUpload = false,
+                Percentage = 0,
+                StatusText = "排队中..."
+            };
+
+            Application.Current.Dispatcher.Invoke(() => GlobalTasks.Add(newTask));
+
+            await _downloadSemaphore.WaitAsync();
+
+            try
+            {
+                newTask.StatusText = "正在下载...";
+                if (!Directory.Exists(targetFolder)) Directory.CreateDirectory(targetFolder);
+
+                var payload = new
+                {
+                    taskId = taskId,
+                    localPath = finalSavePath,
+                    remotePath = remotePath,
+                    webdavUrl = currentConfig.WebDavUrl,
+                    username = currentConfig.Username,
+                    password = currentConfig.Password,
+                    customKey = ActualCustomKey,
+                    offset = offset
+                };
+
+                var json = System.Text.Json.JsonSerializer.Serialize(payload);
+                var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+
+                var resp = await httpClient.PostAsync($"{GoEngineApiUrl}/api/download", content);
+
+                if (!resp.IsSuccessStatusCode) newTask.StatusText = "❌ 下载失败";
+            }
+            catch (Exception) { newTask.StatusText = "❌ 传输异常"; }
+            finally
+            {
+                _downloadSemaphore.Release();
+                if (!newTask.StatusText.Contains("失败") && !newTask.StatusText.Contains("异常"))
+                {
+                    newTask.Percentage = 100;
+                    newTask.StatusText = "✅ 已完成";
+                }
+                newTask.IsCompleted = true;
+            }
+        }
+
         private void MenuLocalUpload_Click(object sender, RoutedEventArgs e)
         {
             BtnUpload_Click(null, null);
         }
 
-        // 右侧：仅重命名功能 (不需要输入完整路径了，只改名字)
         private async void MenuRemoteRename_Click(object sender, RoutedEventArgs e)
         {
             if (!(ListRemote.SelectedItem is FileItem item)) return;
 
-            // 只需要输入新名字
-            string newName = Microsoft.VisualBasic.Interaction.InputBox("请输入新名称:", "重命名", item.Name);
+            string newName = Interaction.InputBox("请输入新名称:", "重命名", item.Name);
             if (string.IsNullOrWhiteSpace(newName) || newName == item.Name) return;
 
             SetProgress(true, "正在重命名...");
@@ -403,7 +711,6 @@ namespace WebDavEncryptManager
                 Uri baseUri = new Uri(davBase + "/");
                 Uri sourceUri = new Uri(baseUri, item.FullPath.TrimStart('/'));
 
-                // 目标路径依然是当前目录，只是名字变了
                 string destRelPath = currentRemotePath.TrimEnd('/').TrimStart('/') + "/" + newName.TrimStart('/');
                 Uri destUri = new Uri(baseUri, destRelPath);
 
@@ -422,20 +729,17 @@ namespace WebDavEncryptManager
             finally { SetProgress(false, "就绪"); }
         }
 
-        // 右侧：唤出新的【可视化目录选择器】进行移动
         private async void MenuRemoteMove_Click(object sender, RoutedEventArgs e)
         {
             if (!(ListRemote.SelectedItem is FileItem item)) return;
 
-            // 打开我们刚刚写好的目录选择窗口
             var folderWin = new RemoteFolderSelectWindow(currentConfig, "/");
             folderWin.Owner = this;
 
             if (folderWin.ShowDialog() == true)
             {
-                // 获取用户选择的目录路径
                 string targetDir = folderWin.SelectedPath;
-                if (targetDir.TrimEnd('/') == currentRemotePath.TrimEnd('/')) return; // 没变动就不移动
+                if (targetDir.TrimEnd('/') == currentRemotePath.TrimEnd('/')) return;
 
                 SetProgress(true, "正在移动文件...");
                 try
@@ -444,7 +748,6 @@ namespace WebDavEncryptManager
                     Uri baseUri = new Uri(davBase + "/");
                     Uri sourceUri = new Uri(baseUri, item.FullPath.TrimStart('/'));
 
-                    // 目标路径 = 用户选的目录 + 原文件名
                     string destRelPath = targetDir.TrimEnd('/').TrimStart('/') + "/" + item.Name.TrimStart('/');
                     Uri destUri = new Uri(baseUri, destRelPath);
 
@@ -456,7 +759,7 @@ namespace WebDavEncryptManager
                     var resp = await httpClient.SendAsync(req);
                     if (resp.IsSuccessStatusCode || (int)resp.StatusCode == 201 || (int)resp.StatusCode == 204)
                     {
-                        await LoadRemoteFiles(currentRemotePath); // 刷新当前列表，文件应该消失了
+                        await LoadRemoteFiles(currentRemotePath);
                         MessageBox.Show($"成功移动到: {targetDir}");
                     }
                     else MessageBox.Show($"移动失败: {resp.StatusCode}");
@@ -466,7 +769,6 @@ namespace WebDavEncryptManager
             }
         }
 
-        // 🌟 修复：写入真正的云端删除逻辑
         private async void MenuRemoteDelete_Click(object sender, RoutedEventArgs e)
         {
             if (MessageBox.Show("确认要从云端彻底删除选中的文件吗？此操作不可恢复！", "删除确认", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.No)
@@ -497,20 +799,17 @@ namespace WebDavEncryptManager
             }
         }
 
-        // 在 MainWindow 类中定义一个变量保存最终的密钥
         private string ActualCustomKey = "";
 
-        // 处理确定/修改按钮的点击
         private void BtnConfirmKey_Click(object sender, RoutedEventArgs e)
         {
             if (TxtCustomKeyVisible.Visibility == Visibility.Visible)
             {
-                // 动作：锁定并隐藏
                 string key = TxtCustomKeyVisible.Text.Trim();
                 if (string.IsNullOrEmpty(key)) return;
 
                 ActualCustomKey = key;
-                TxtCustomKeyHidden.Password = key; // 同步给密码框显示星号
+                TxtCustomKeyHidden.Password = key;
 
                 TxtCustomKeyVisible.Visibility = Visibility.Collapsed;
                 TxtCustomKeyHidden.Visibility = Visibility.Visible;
@@ -518,7 +817,6 @@ namespace WebDavEncryptManager
             }
             else
             {
-                // 动作：解锁并修改
                 TxtCustomKeyVisible.Text = ActualCustomKey;
 
                 TxtCustomKeyHidden.Visibility = Visibility.Collapsed;
@@ -526,38 +824,34 @@ namespace WebDavEncryptManager
                 BtnConfirmKey.Content = "确定";
             }
         }
+
         // ==========================================
-        // 🌟 进度条轮询控制器
+        // 进度条旧版方法 (保留以防报错)
         // ==========================================
         private void StartProgressTracker(string taskId, string taskName)
         {
             _currentTaskId = taskId;
             PrgTask.Value = 0;
-            PrgTask.IsIndeterminate = false; // 明确关闭无限循环动画
+            PrgTask.IsIndeterminate = false;
             TxtStatus.Text = taskName;
             TxtPercentage.Text = "0.0%";
 
             _progressTimer = new System.Windows.Threading.DispatcherTimer();
-            _progressTimer.Interval = TimeSpan.FromMilliseconds(500); // 每 0.5 秒查询一次
+            _progressTimer.Interval = TimeSpan.FromMilliseconds(500);
             _progressTimer.Tick += async (s, e) =>
             {
                 try
                 {
-                    // 向 Go 核心请求最新进度
                     var resp = await httpClient.GetStringAsync($"{GoEngineApiUrl}/api/progress?id={_currentTaskId}");
                     var progress = JsonSerializer.Deserialize<TaskProgress>(resp);
 
                     if (progress != null)
                     {
-                        // 更新 UI
                         PrgTask.Value = progress.percentage;
-                        TxtPercentage.Text = $"{progress.percentage:F1}%"; // F1 表示保留一位小数
+                        TxtPercentage.Text = $"{progress.percentage:F1}%";
                     }
                 }
-                catch
-                {
-                    // 忽略轮询期间偶发的网络抖动，防止程序崩溃
-                }
+                catch { }
             };
             _progressTimer.Start();
         }
@@ -569,11 +863,10 @@ namespace WebDavEncryptManager
                 _progressTimer.Stop();
                 _progressTimer = null;
             }
-            PrgTask.Value = 100; // 强制填满
+            PrgTask.Value = 100;
             TxtPercentage.Text = "100%";
             TxtStatus.Text = "任务完成";
 
-            // 延迟 2 秒后恢复初始状态
             Task.Delay(2000).ContinueWith(t => Dispatcher.Invoke(() =>
             {
                 PrgTask.Value = 0;
@@ -581,7 +874,5 @@ namespace WebDavEncryptManager
                 TxtStatus.Text = "就绪";
             }));
         }
-
-
     }
 }
