@@ -9,6 +9,16 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <None Remove="WebDavEncryptEngine.exe" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="WebDavEncryptEngine.exe">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="System.Management" Version="10.0.7" />
   </ItemGroup>
 

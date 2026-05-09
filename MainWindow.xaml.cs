@@ -15,6 +15,8 @@ using System.Xml.Linq;
 using Microsoft.VisualBasic;
 using Microsoft.VisualBasic.FileIO;
 using System.Collections.ObjectModel;
+using System.Reflection;
+
 
 namespace WebDavEncryptManager
 {
@@ -33,7 +35,82 @@ namespace WebDavEncryptManager
         private string _currentTaskId;
         private ObservableCollection<TransferTask> GlobalTasks = new ObservableCollection<TransferTask>();
         private TransferWindow _transferWindow;
+        private Process _goEngineProcess;
+        private string _extractedGoEnginePath;
 
+        private void StartGoEngine()
+        {
+            try
+            {
+                // 1. 确定释放到系统的临时目录
+                string tempFolder = Path.GetTempPath();
+                _extractedGoEnginePath = Path.Combine(tempFolder, "WebDavEncryptEngine.exe");
+
+                // 2. 如果文件已存在，先尝试删除（清理旧版本）
+                if (File.Exists(_extractedGoEnginePath))
+                {
+                    try { File.Delete(_extractedGoEnginePath); }
+                    catch { /* 如果被占用，说明后台可能有残留进程，暂不处理 */ }
+                }
+
+                // 3. 🌟 核心排错：自动寻找嵌入的资源名称
+                if (!File.Exists(_extractedGoEnginePath))
+                {
+                    var assembly = Assembly.GetExecutingAssembly();
+                    string[] allResourceNames = assembly.GetManifestResourceNames();
+
+                    // 自动匹配结尾是目标文件名的资源
+                    string resourceName = allResourceNames.FirstOrDefault(n => n.EndsWith("WebDavEncryptEngine.exe"));
+
+                    if (string.IsNullOrEmpty(resourceName))
+                    {
+                        // 如果找不到，弹出极其详细的错误列表供我们排查
+                        MessageBox.Show("❌ 错误：在程序集中找不到嵌入的 Go 引擎！\n\n" +
+                                        "请确保你已经在 Visual Studio 中将 WebDavEncryptEngine.exe 的【生成操作】改为了【嵌入的资源】。\n\n" +
+                                        "当前程序集内的所有资源有：\n" + string.Join("\n", allResourceNames),
+                                        "资源缺失诊断");
+                        return;
+                    }
+
+                    // 释放文件到本地
+                    using (Stream resourceStream = assembly.GetManifestResourceStream(resourceName))
+                    using (FileStream fileStream = new FileStream(_extractedGoEnginePath, FileMode.Create))
+                    {
+                        resourceStream.CopyTo(fileStream);
+                    }
+
+                    // 调试弹窗 1：确认释放成功
+                    // MessageBox.Show($"✅ 成功将 Go 引擎释放到:\n{_extractedGoEnginePath}", "调试信息");
+                }
+
+                // 4. 启动 Go 引擎 (🛠️ 开启调试模式)
+                _goEngineProcess = new Process();
+                _goEngineProcess.StartInfo.FileName = _extractedGoEnginePath;
+
+                // 🌟 调试阶段：临时让黑窗口显示出来，以便查看 Go 是否有报错输出
+                _goEngineProcess.StartInfo.UseShellExecute = true;   // 改为 true
+                _goEngineProcess.StartInfo.CreateNoWindow = false;   // 改为 false 以显示窗口
+
+                _goEngineProcess.Start();
+
+                // 调试弹窗 2：确认触发启动
+                // MessageBox.Show("🚀 Go 引擎已触发启动！请查看是否弹出了黑色的命令行窗口。如果没有闪退，现在去测试网页吧！", "调试信息");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"❌ 加密传输引擎启动发生严重异常:\n{ex.Message}", "启动失败");
+            }
+        }
+
+        // 确保在窗口关闭时杀掉后台的 Go 进程
+        protected override void OnClosed(EventArgs e)
+        {
+            base.OnClosed(e);
+            if (_goEngineProcess != null && !_goEngineProcess.HasExited)
+            {
+                try { _goEngineProcess.Kill(); } catch { }
+            }
+        }
         // 用于接收 Go 返回的进度数据
         public class TaskProgress
         {
@@ -62,6 +139,7 @@ namespace WebDavEncryptManager
                 _refreshDebounceTimer.Stop(); // 触发一次后立刻停止
                 _ = LoadRemoteFiles(currentRemotePath); // 执行真正的刷新
             };
+            StartGoEngine();
 
             currentConfig = HardwareCryptoHelper.LoadEncryptedConfig("config.dat");
             if (!string.IsNullOrEmpty(currentConfig.Username))
