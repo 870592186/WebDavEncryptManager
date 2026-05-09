@@ -223,14 +223,21 @@ namespace WebDavEncryptManager
         private void MenuRemoteOpen_Click(object sender, RoutedEventArgs e) { if (ListRemote.SelectedItem is FileItem item) HandleRemoteItem(item); }
 
         // 🌟 新增缺失的下载菜单点击事件
+        // ==========================================
+        // 核心拆分 1：右键下载菜单事件
+        // ==========================================
         private async void MenuRemoteDownload_Click(object sender, RoutedEventArgs e)
         {
             foreach (FileItem item in ListRemote.SelectedItems)
             {
-                if (!item.IsDirectory) await DownloadAndOpenFile(item);
+                // 触发正式下载
+                if (!item.IsDirectory) await DownloadRemoteFile(item);
             }
         }
 
+        // ==========================================
+        // 核心拆分 2：双击/打开菜单事件路由
+        // ==========================================
         private async void HandleRemoteItem(FileItem item)
         {
             if (item.IsDirectory) { await LoadRemoteFiles(item.FullPath); return; }
@@ -241,66 +248,69 @@ namespace WebDavEncryptManager
 
             if (Array.Exists(vids, x => x == ext))
             {
+                // 视频文件走流式播放
                 string url = $"{GoEngineApiUrl}/api/stream?path={Uri.EscapeDataString(item.FullPath)}&url={Uri.EscapeDataString(currentConfig.WebDavUrl)}&user={Uri.EscapeDataString(currentConfig.Username)}&pass={Uri.EscapeDataString(currentConfig.Password)}&key={Uri.EscapeDataString(ActualCustomKey)}";
                 Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
                 SetProgress(false, "就绪");
-            }   
+            }
             else
             {
-                await DownloadAndOpenFile(item);
+                // 🌟 修复：非视频文件，走临时预览逻辑
+                await PreviewRemoteFile(item);
             }
         }
 
-        // 将非视频文件的下载提取出来复用
-        // 将非视频文件的下载提取出来复用，并修改为下载到系统“下载”文件夹
-        private async Task DownloadAndOpenFile(FileItem item)
+        // ==========================================
+        // 核心拆分 3：临时预览逻辑 (解密到 Temp 目录并直接打开)
+        // ==========================================
+        private async Task PreviewRemoteFile(FileItem item)
+        {
+            SetProgress(true, $"正在准备预览 {item.Name}...");
+            try
+            {
+                // 使用系统临时文件夹
+                string tempPath = Path.Combine(Path.GetTempPath(), item.Name);
+                var payload = new { localPath = tempPath, remotePath = item.FullPath, webdavUrl = currentConfig.WebDavUrl, username = currentConfig.Username, password = currentConfig.Password, customKey = ActualCustomKey };
+                var resp = await httpClient.PostAsync($"{GoEngineApiUrl}/api/download", new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json"));
+
+                if (resp.IsSuccessStatusCode)
+                {
+                    // 预览成功后，直接运行该文件
+                    Process.Start(new ProcessStartInfo { FileName = tempPath, UseShellExecute = true });
+                }
+                else MessageBox.Show("解密预览失败！");
+            }
+            catch (Exception ex) { MessageBox.Show($"预览异常: {ex.Message}"); }
+            finally { SetProgress(false, "就绪"); }
+        }
+
+        // ==========================================
+        // 核心拆分 4：正式下载逻辑 (解密到 Downloads 目录并打开文件夹)
+        // ==========================================
+        private async Task DownloadRemoteFile(FileItem item)
         {
             SetProgress(true, $"正在下载解密 {item.Name}...");
             try
             {
-                // 🌟 1. 获取当前 Windows 用户的“下载”文件夹路径
+                // 使用系统“下载”文件夹
                 string userProfilePath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
                 string downloadsFolder = Path.Combine(userProfilePath, "Downloads");
+                if (!Directory.Exists(downloadsFolder)) Directory.CreateDirectory(downloadsFolder);
 
-                // 确保“下载”文件夹存在（绝大多数情况存在，以防万一）
-                if (!Directory.Exists(downloadsFolder))
-                {
-                    Directory.CreateDirectory(downloadsFolder);
-                }
-
-                // 🌟 2. 拼接最终的保存路径
                 string finalSavePath = Path.Combine(downloadsFolder, item.Name);
-
-                // 构造发给 Go 引擎的请求体，将 localPath 设置为最终保存路径
-                var payload = new
-                {
-                    localPath = finalSavePath,
-                    remotePath = item.FullPath,
-                    webdavUrl = currentConfig.WebDavUrl,
-                    username = currentConfig.Username,
-                    password = currentConfig.Password,
-                    customKey = ActualCustomKey
-                };
+                var payload = new { localPath = finalSavePath, remotePath = item.FullPath, webdavUrl = currentConfig.WebDavUrl, username = currentConfig.Username, password = currentConfig.Password, customKey = ActualCustomKey };
 
                 var resp = await httpClient.PostAsync($"{GoEngineApiUrl}/api/download", new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json"));
 
                 if (resp.IsSuccessStatusCode)
                 {
-                    // 🌟 3. 下载成功后，打开资源管理器并选中该文件
+                    // 🌟 下载成功后，打开资源管理器并高亮选中文件，但不运行它
                     Process.Start("explorer.exe", $"/select,\"{finalSavePath}\"");
-                    SetProgress(false, "下载完成");
                 }
-                else
-                {
-                    MessageBox.Show("解密下载失败！请检查网络或后端引擎。");
-                    SetProgress(false, "下载失败");
-                }
+                else MessageBox.Show("解密下载失败！请检查网络或后端引擎。");
             }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"下载异常: {ex.Message}");
-                SetProgress(false, "就绪");
-            }
+            catch (Exception ex) { MessageBox.Show($"下载异常: {ex.Message}"); }
+            finally { SetProgress(false, "就绪"); }
         }
 
         // ==========================================
