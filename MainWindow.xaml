@@ -103,10 +103,17 @@
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
+
             <Button Content="⬆️ 加密上传" Width="120" Height="35" Margin="0,0,10,0" Click="BtnUpload_Click" Background="#0078D7" Foreground="White" FontWeight="Bold"/>
+
             <Grid Grid.Column="1">
+                <!-- 去掉了无限循环，设置了最大最小值 -->
                 <ProgressBar x:Name="PrgTask" Height="35" Minimum="0" Maximum="100"/>
-                <TextBlock x:Name="TxtStatus" Text="就绪" HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="Bold"/>
+
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <TextBlock x:Name="TxtStatus" Text="就绪" FontWeight="Bold" Margin="0,0,10,0"/>
+                    <TextBlock x:Name="TxtPercentage" Text="" FontWeight="Bold" Foreground="#333"/>
+                </StackPanel>
             </Grid>
         </Grid>
     </Grid>

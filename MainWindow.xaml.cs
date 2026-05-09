@@ -24,6 +24,16 @@ namespace WebDavEncryptManager
         private string currentRemotePath = "/";
         private FileSystemWatcher _localWatcher;
         private readonly string GoEngineApiUrl = "http://127.0.0.1:8888";
+        private System.Windows.Threading.DispatcherTimer _progressTimer;
+        private string _currentTaskId;
+        // 用于接收 Go 返回的进度数据
+        public class TaskProgress
+        {
+            public long total { get; set; }
+            public long current { get; set; }
+            public double percentage { get; set; }
+            public string status { get; set; }
+        }
 
         public MainWindow()
         {
@@ -208,15 +218,40 @@ namespace WebDavEncryptManager
         private async void BtnUpload_Click(object sender, RoutedEventArgs e)
         {
             if (string.IsNullOrEmpty(currentConfig.Username)) { MessageBox.Show("请先配置 WebDAV"); return; }
-            SetProgress(true, "正在加密上传...");
+
             foreach (FileItem selected in ListLocal.SelectedItems)
             {
                 if (selected.IsDirectory) continue;
-                var payload = new { localPath = selected.FullPath, remotePath = currentRemotePath.TrimEnd('/') + "/" + selected.Name, webdavUrl = currentConfig.WebDavUrl, username = currentConfig.Username, password = currentConfig.Password, customKey = ActualCustomKey };
-                await httpClient.PostAsync($"{GoEngineApiUrl}/api/upload", new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json"));
+
+                // 🌟 1. 生成独一无二的 TaskID
+                string taskId = Guid.NewGuid().ToString();
+
+                // 🌟 2. 启动进度追踪器
+                StartProgressTracker(taskId, $"正在加密上传 {selected.Name}...");
+
+                try
+                {
+                    var payload = new
+                    {
+                        taskId = taskId, // 发送给 Go
+                        localPath = selected.FullPath,
+                        remotePath = currentRemotePath.TrimEnd('/') + "/" + selected.Name,
+                        webdavUrl = currentConfig.WebDavUrl,
+                        username = currentConfig.Username,
+                        password = currentConfig.Password,
+                        customKey = TxtCustomKeyVisible.Text.Trim() // 使用前面确定的密钥变量
+                    };
+
+                    var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+                    await httpClient.PostAsync($"{GoEngineApiUrl}/api/upload", content);
+                }
+                finally
+                {
+                    // 🌟 3. 任务结束（无论成功或失败），停止追踪器
+                    StopProgressTracker();
+                }
             }
-            SetProgress(false, "上传完毕");
-            await LoadRemoteFiles(currentRemotePath);
+            await LoadRemoteFiles(currentRemotePath); // 刷新列表
         }
 
         private void ListRemote_MouseDoubleClick(object sender, MouseButtonEventArgs e) { if (ListRemote.SelectedItem is FileItem item) HandleRemoteItem(item); }
@@ -287,30 +322,59 @@ namespace WebDavEncryptManager
         // ==========================================
         // 核心拆分 4：正式下载逻辑 (解密到 Downloads 目录并打开文件夹)
         // ==========================================
+        // ==========================================
+        // 正式下载逻辑 (解密到 Downloads 目录并打开文件夹)
+        // ==========================================
         private async Task DownloadRemoteFile(FileItem item)
         {
-            SetProgress(true, $"正在下载解密 {item.Name}...");
+            // 🌟 1. 为本次下载生成独一无二的 TaskID
+            string taskId = Guid.NewGuid().ToString();
+
+            // 🌟 2. 启动进度追踪器 (替代原来的 SetProgress)
+            StartProgressTracker(taskId, $"正在下载解密 {item.Name}...");
+
             try
             {
-                // 使用系统“下载”文件夹
+                // 获取系统“下载”文件夹
                 string userProfilePath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
                 string downloadsFolder = Path.Combine(userProfilePath, "Downloads");
                 if (!Directory.Exists(downloadsFolder)) Directory.CreateDirectory(downloadsFolder);
 
                 string finalSavePath = Path.Combine(downloadsFolder, item.Name);
-                var payload = new { localPath = finalSavePath, remotePath = item.FullPath, webdavUrl = currentConfig.WebDavUrl, username = currentConfig.Username, password = currentConfig.Password, customKey = ActualCustomKey };
+
+                // 🌟 3. 在发给 Go 引擎的 JSON 数据中加入 taskId
+                var payload = new
+                {
+                    taskId = taskId, // 发送给 Go 用于绑定进度
+                    localPath = finalSavePath,
+                    remotePath = item.FullPath,
+                    webdavUrl = currentConfig.WebDavUrl,
+                    username = currentConfig.Username,
+                    password = currentConfig.Password,
+                    customKey = TxtCustomKeyVisible.Text.Trim() // 确保使用正确的密钥变量
+                };
 
                 var resp = await httpClient.PostAsync($"{GoEngineApiUrl}/api/download", new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json"));
 
                 if (resp.IsSuccessStatusCode)
                 {
-                    // 🌟 下载成功后，打开资源管理器并高亮选中文件，但不运行它
+                    // 下载成功后，打开资源管理器并高亮选中文件
                     Process.Start("explorer.exe", $"/select,\"{finalSavePath}\"");
                 }
-                else MessageBox.Show("解密下载失败！请检查网络或后端引擎。");
+                else
+                {
+                    MessageBox.Show("解密下载失败！请检查网络或后端引擎。");
+                }
             }
-            catch (Exception ex) { MessageBox.Show($"下载异常: {ex.Message}"); }
-            finally { SetProgress(false, "就绪"); }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"下载异常: {ex.Message}");
+            }
+            finally
+            {
+                // 🌟 4. 任务结束（无论成功或失败），停止追踪器并恢复 UI
+                StopProgressTracker();
+            }
         }
 
         // ==========================================
@@ -462,10 +526,62 @@ namespace WebDavEncryptManager
                 BtnConfirmKey.Content = "确定";
             }
         }
+        // ==========================================
+        // 🌟 进度条轮询控制器
+        // ==========================================
+        private void StartProgressTracker(string taskId, string taskName)
+        {
+            _currentTaskId = taskId;
+            PrgTask.Value = 0;
+            PrgTask.IsIndeterminate = false; // 明确关闭无限循环动画
+            TxtStatus.Text = taskName;
+            TxtPercentage.Text = "0.0%";
 
-        // ⚠️ 注意：在你之前写的 BtnUpload_Click、HandleRemoteItem 等发起网络请求的地方，
-        // 记得把 payload 里的 customKey = TxtCustomKey.Text.Trim() 
-        // 替换为 customKey = ActualCustomKey
+            _progressTimer = new System.Windows.Threading.DispatcherTimer();
+            _progressTimer.Interval = TimeSpan.FromMilliseconds(500); // 每 0.5 秒查询一次
+            _progressTimer.Tick += async (s, e) =>
+            {
+                try
+                {
+                    // 向 Go 核心请求最新进度
+                    var resp = await httpClient.GetStringAsync($"{GoEngineApiUrl}/api/progress?id={_currentTaskId}");
+                    var progress = JsonSerializer.Deserialize<TaskProgress>(resp);
+
+                    if (progress != null)
+                    {
+                        // 更新 UI
+                        PrgTask.Value = progress.percentage;
+                        TxtPercentage.Text = $"{progress.percentage:F1}%"; // F1 表示保留一位小数
+                    }
+                }
+                catch
+                {
+                    // 忽略轮询期间偶发的网络抖动，防止程序崩溃
+                }
+            };
+            _progressTimer.Start();
+        }
+
+        private void StopProgressTracker()
+        {
+            if (_progressTimer != null)
+            {
+                _progressTimer.Stop();
+                _progressTimer = null;
+            }
+            PrgTask.Value = 100; // 强制填满
+            TxtPercentage.Text = "100%";
+            TxtStatus.Text = "任务完成";
+
+            // 延迟 2 秒后恢复初始状态
+            Task.Delay(2000).ContinueWith(t => Dispatcher.Invoke(() =>
+            {
+                PrgTask.Value = 0;
+                TxtPercentage.Text = "";
+                TxtStatus.Text = "就绪";
+            }));
+        }
+
 
     }
 }
