@@ -20,34 +20,30 @@
 
     <Grid Margin="10">
         <Grid.RowDefinitions>
+            <!-- 调整了行高，第一行留给全局设置和同步盘，第二行为主工作区 -->
             <RowDefinition Height="45"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="50"/>
         </Grid.RowDefinitions>
 
-        <!-- 顶部栏 -->
+        <!-- ========================================== -->
+        <!-- 1. 顶部全局工具栏 -->
+        <!-- ========================================== -->
         <Grid Grid.Row="0">
-            <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
-                <TextBlock Text="💻 本地磁盘" FontWeight="Bold" Margin="0,0,10,0"/>
-                <ComboBox x:Name="ComboDrives" Width="60" SelectionChanged="ComboDrives_SelectionChanged"/>
-            </StackPanel>
+            <!-- 左上角可以放软件名称或留白，保持界面清爽 -->
+            <TextBlock Text="WebDAV 传输引擎" FontWeight="Bold" FontSize="16" Foreground="#555" VerticalAlignment="Center" HorizontalAlignment="Left" Margin="5,0,0,0"/>
+
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-                <TextBlock Text="信封密钥:" Margin="0,0,5,0" Foreground="Gray" VerticalAlignment="Center"/>
-
-                <!-- 使用 Grid 将明文框和密文框叠在一起 -->
-                <Grid Width="120" Margin="0,0,10,0">
-                    <TextBox x:Name="TxtCustomKeyVisible" Height="25" Padding="2" Visibility="Visible" ToolTip="在此输入自定义密钥"/>
-                    <PasswordBox x:Name="TxtCustomKeyHidden" Height="25" Padding="2" Visibility="Collapsed" IsEnabled="False"/>
-                </Grid>
-
-                <!-- 新增的确定/修改按钮 -->
-                <Button x:Name="BtnConfirmKey" Content="确定" Height="25" Padding="15,0" Margin="0,0,15,0" Click="BtnConfirmKey_Click"/>
+                <!-- 🌟 新增的同步盘按钮 -->
+                <Button x:Name="BtnSyncDrive" Content="🔄 同步盘" Height="30" Padding="15,0" Margin="0,0,15,0" Click="BtnSyncDrive_Click" Background="#E1F0FF" Foreground="#005A9E" FontWeight="Bold" BorderBrush="#0078D7"/>
 
                 <Button Content="⚙️ WebDAV 设置" Height="30" Padding="10,0" Click="BtnSettings_Click"/>
             </StackPanel>
         </Grid>
 
-        <!-- 双栏列表 -->
+        <!-- ========================================== -->
+        <!-- 2. 双栏列表 (带有对称的头部) -->
+        <!-- ========================================== -->
         <Grid Grid.Row="1">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
@@ -55,32 +51,67 @@
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
 
-            <Border BorderBrush="#DDD" BorderThickness="1" CornerRadius="5">
-                <ListBox x:Name="ListLocal" SelectionMode="Extended" BorderThickness="0" ItemTemplate="{StaticResource FileTemplate}" MouseDoubleClick="ListLocal_MouseDoubleClick">
-                    <!-- 左侧本地列表的右键菜单 -->
-                    <ListBox.ContextMenu>
-                        <ContextMenu>
-                            <MenuItem Header="打开" Click="MenuLocalOpen_Click"/>
-                            <MenuItem Header="加密上传至云端" Click="MenuLocalUpload_Click" FontWeight="Bold"/>
-                            <Separator/>
-                            <MenuItem Header="删除 (回收站)" Click="MenuLocalDelete_Click"/>
-                            <MenuItem Header="重命名" Click="MenuLocalRename_Click"/>
-                        </ContextMenu>
-                    </ListBox.ContextMenu>
-                </ListBox>
-            </Border>
-
-            <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Center" Background="#EEE"/>
-
-            <Border Grid.Column="2" BorderBrush="#DDD" BorderThickness="1" CornerRadius="5">
+            <!-- 🌟 左侧：本地文件区 -->
+            <Border BorderBrush="#DDD" BorderThickness="1" CornerRadius="5" Background="White">
                 <Grid>
                     <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="40"/>
+                        <!-- 本地专属头部 -->
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
-                    <TextBlock x:Name="TxtRemotePath" Text="☁️ 云端路径: /" FontWeight="Bold" Margin="5"/>
+
+                    <!-- 本地专属头部：放置磁盘选择和密钥设置 -->
+                    <Border Grid.Row="0" BorderBrush="#EEE" BorderThickness="0,0,0,1" Background="#F9F9F9">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="10,0">
+                            <TextBlock Text="💻 本地磁盘" FontWeight="Bold" Margin="0,0,10,0" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="ComboDrives" Width="60" SelectionChanged="ComboDrives_SelectionChanged" VerticalContentAlignment="Center"/>
+
+                            <!-- 分隔线 -->
+                            <Rectangle Width="1" Fill="#CCC" Margin="15,8"/>
+
+                            <TextBlock Text="信封密钥:" Margin="0,0,5,0" Foreground="Gray" VerticalAlignment="Center"/>
+                            <Grid Width="120" Margin="0,0,10,0">
+                                <TextBox x:Name="TxtCustomKeyVisible" Height="25" Padding="2" Visibility="Visible" ToolTip="在此输入自定义密钥" VerticalContentAlignment="Center"/>
+                                <PasswordBox x:Name="TxtCustomKeyHidden" Height="25" Padding="2" Visibility="Collapsed" IsEnabled="False" VerticalContentAlignment="Center"/>
+                            </Grid>
+                            <Button x:Name="BtnConfirmKey" Content="确定" Height="25" Padding="10,0" Click="BtnConfirmKey_Click"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- 本地列表 -->
+                    <ListBox x:Name="ListLocal" Grid.Row="1" SelectionMode="Extended" BorderThickness="0" ItemTemplate="{StaticResource FileTemplate}" MouseDoubleClick="ListLocal_MouseDoubleClick">
+                        <ListBox.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="打开" Click="MenuLocalOpen_Click"/>
+                                <MenuItem Header="加密上传至云端" Click="MenuLocalUpload_Click" FontWeight="Bold"/>
+                                <Separator/>
+                                <MenuItem Header="删除 (回收站)" Click="MenuLocalDelete_Click"/>
+                                <MenuItem Header="重命名" Click="MenuLocalRename_Click"/>
+                            </ContextMenu>
+                        </ListBox.ContextMenu>
+                    </ListBox>
+                </Grid>
+            </Border>
+
+            <!-- 中间分割线 -->
+            <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Center" Background="#EEE"/>
+
+            <!-- 🌟 右侧：云端文件区 -->
+            <Border Grid.Column="2" BorderBrush="#DDD" BorderThickness="1" CornerRadius="5" Background="White">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="40"/>
+                        <!-- 云端专属头部 -->
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- 云端专属头部：放置路径显示，与左侧完美对齐 -->
+                    <Border Grid.Row="0" BorderBrush="#EEE" BorderThickness="0,0,0,1" Background="#F9F9F9">
+                        <TextBlock x:Name="TxtRemotePath" Text="☁️ 云端路径: /" FontWeight="Bold" VerticalAlignment="Center" Margin="10,0"/>
+                    </Border>
+
+                    <!-- 云端列表 -->
                     <ListBox x:Name="ListRemote" Grid.Row="1" SelectionMode="Extended" BorderThickness="0" ItemTemplate="{StaticResource FileTemplate}" MouseDoubleClick="ListRemote_MouseDoubleClick">
-                        <!-- 右侧云端列表的右键菜单 -->
                         <ListBox.ContextMenu>
                             <ContextMenu>
                                 <MenuItem Header="打开 / 播放" Click="MenuRemoteOpen_Click"/>
@@ -97,7 +128,9 @@
             </Border>
         </Grid>
 
-        <!-- 底部进度栏 -->
+        <!-- ========================================== -->
+        <!-- 3. 底部进度与操作栏 (完全保留您的设计) -->
+        <!-- ========================================== -->
         <Grid Grid.Row="2" Margin="0,10,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto"/>
@@ -105,11 +138,12 @@
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
-            <!-- 🌟 新增的全局冲突策略选择框 -->
+
             <ComboBox x:Name="CmbConflictPolicy" Grid.Column="0" Width="105" Height="35" Margin="0,0,10,0" SelectedIndex="0" VerticalContentAlignment="Center">
                 <ComboBoxItem Content="同名跳过 ⏭️"/>
                 <ComboBoxItem Content="同名覆盖 ⚠️"/>
             </ComboBox>
+
             <Button Grid.Column="1" Content="⬆️ 加密上传" Width="120" Height="35" Margin="0,0,10,0" Click="BtnUpload_Click" Background="#0078D7" Foreground="White" FontWeight="Bold"/>
 
             <Grid Grid.Column="2">
@@ -120,7 +154,6 @@
                 </StackPanel>
             </Grid>
 
-            <!-- 🌟 新增的传输列表按钮 -->
             <Button Grid.Column="3" Content="传输列表 📝" Width="100" Height="35" Margin="10,0,0,0" Click="BtnTransferList_Click"/>
         </Grid>
     </Grid>

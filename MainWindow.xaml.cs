@@ -88,9 +88,9 @@ namespace WebDavEncryptManager
                 _goEngineProcess.StartInfo.FileName = _extractedGoEnginePath;
 
                 // 🌟 调试阶段：临时让黑窗口显示出来，以便查看 Go 是否有报错输出
-                _goEngineProcess.StartInfo.UseShellExecute = true;   // 改为 true
-                _goEngineProcess.StartInfo.CreateNoWindow = false;   // 改为 false 以显示窗口
-
+                _goEngineProcess.StartInfo.UseShellExecute = false;       // 不使用系统外壳程序启动
+                _goEngineProcess.StartInfo.CreateNoWindow = true;         // 明确指示不创建控制台窗口
+                _goEngineProcess.StartInfo.WindowStyle = ProcessWindowStyle.Hidden; // 窗口样式设置为隐藏（双重保险）
                 _goEngineProcess.Start();
 
                 // 调试弹窗 2：确认触发启动
@@ -904,6 +904,23 @@ namespace WebDavEncryptManager
         }
 
         // ==========================================
+        // 用于保存同步盘窗口的唯一实例（防止用户重复点击打开多个）
+        private SyncDriveWindow _syncDriveWindow;
+
+        // 同步盘按钮点击事件
+        private void BtnSyncDrive_Click(object sender, RoutedEventArgs e)
+        {
+            // 如果窗口尚未创建，或者已经被用户关闭了，我们就重新实例化一个
+            if (_syncDriveWindow == null || !_syncDriveWindow.IsLoaded)
+            {
+                _syncDriveWindow = new SyncDriveWindow();
+                _syncDriveWindow.Owner = this; // 设定父窗口，保证层级关系
+            }
+
+            // 显示窗口并将其带到最前面
+            _syncDriveWindow.Show();
+            _syncDriveWindow.Activate();
+        }
         // 进度条旧版方法 (保留以防报错)
         // ==========================================
         private void StartProgressTracker(string taskId, string taskName)
