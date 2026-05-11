@@ -8,53 +8,63 @@ namespace WebDavEncryptManager
 {
     public partial class App : Application
     {
-        // 🌟 定义一个唯一的 Mutex 名称，用于识别程序是否已经在运行
         private static Mutex _mutex = null;
 
         protected override void OnStartup(StartupEventArgs e)
         {
-            const string appName = "WebDavEncryptManager_Global_Mutex";
+            const string appName = "WebDavEncryptManager_Unique_Mutex";
             bool createdNew;
 
-            // 🌟 1. 尝试创建一个互斥锁
+            // 1. 防止重复启动
             _mutex = new Mutex(true, appName, out createdNew);
-
             if (!createdNew)
             {
-                // 🌟 如果锁已经存在，说明软件正在运行
-                MessageBox.Show("软件已经在运行中，请在系统托盘查看。", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
-                Application.Current.Shutdown(); // 退出当前实例
+                MessageBox.Show("程序已经在运行中，请在系统托盘查看。", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+                Application.Current.Shutdown();
                 return;
             }
 
             base.OnStartup(e);
 
-            // 🌟 2. 显示启动页面
+            // 2. 显示启动页面 (含免责声明)
             var splash = new SplashWindow();
             splash.Show();
 
-            // 🌟 3. 在后台执行初始化任务（模拟加载，避免主界面卡顿）
+            // 3. 后台控制流程
             Task.Run(async () =>
             {
-                splash.UpdateStatus("正在加载配置...");
-                await Task.Delay(800); // 给用户一点反应时间，也确保硬件资源就绪
+                // 🌟 挂起任务，等待用户在 UI 上点击同意或拒绝
+                bool isAccepted = await splash.WaitForAcceptanceAsync();
 
-                splash.UpdateStatus("正在解压并启动 Go 引擎...");
-                // 这里的引擎启动逻辑实际上在 MainWindow 构造函数里，我们直接初始化主窗体即可
+                // 如果用户拒绝，窗口里的逻辑已经调用了 Shutdown，这里直接 Return
+                if (!isAccepted) return;
 
-                // 🌟 4. 初始化完成后，在主线程切换到主窗口
+                // 用户点击了同意，开始走进度条和加载逻辑
+                UpdateSplash(splash, "正在加载本地配置与密钥...", 800);
+
+                UpdateSplash(splash, "正在检查 WebDAV 节点连接...", 1000);
+
+                UpdateSplash(splash, "正在启动加密解密引擎(Go)...", 1200);
+
+                // 4. 全部准备就绪，切换主窗口
                 Dispatcher.Invoke(() =>
                 {
                     MainWindow mainWin = new MainWindow();
+                    mainWin.Show();
+
                     splash.Close(); // 关闭加载页
-                    mainWin.Show(); // 显示主界面
                 });
             });
         }
 
+        private void UpdateSplash(SplashWindow sw, string msg, int delay)
+        {
+            sw.UpdateStatus(msg);
+            Thread.Sleep(delay); // 模拟加载过程
+        }
+
         protected override void OnExit(ExitEventArgs e)
         {
-            // 🌟 释放 Mutex
             if (_mutex != null)
             {
                 _mutex.ReleaseMutex();
