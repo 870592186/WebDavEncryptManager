@@ -14,7 +14,7 @@
 
   <ItemGroup>
     <EmbeddedResource Include="WebDavEncryptEngine.exe">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
     </EmbeddedResource>
   </ItemGroup>
 
