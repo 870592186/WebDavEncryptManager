@@ -175,9 +175,9 @@ namespace WebDavEncryptManager
 
                 _goEngineProcess = new Process();
                 _goEngineProcess.StartInfo.FileName = _extractedGoEnginePath;
-                _goEngineProcess.StartInfo.UseShellExecute = true;
-                _goEngineProcess.StartInfo.CreateNoWindow = false;
-                _goEngineProcess.StartInfo.WindowStyle = ProcessWindowStyle.Normal;
+                _goEngineProcess.StartInfo.UseShellExecute = false;
+                _goEngineProcess.StartInfo.CreateNoWindow = true;
+                _goEngineProcess.StartInfo.WindowStyle = ProcessWindowStyle.Hidden;
                 _goEngineProcess.Start();
             }
             catch (Exception ex)
@@ -302,11 +302,21 @@ namespace WebDavEncryptManager
                 var content = new StringContent(System.Text.Json.JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
 
                 var resp = await httpClient.PostAsync($"{GoEngineApiUrl}/api/upload", content, cts.Token);
-                if (!resp.IsSuccessStatusCode) task.StatusText = "❌ 上传失败";
+
+                // 🌟 核心排错机制：如果底层返回失败，读取具体死因并弹窗！
+                if (!resp.IsSuccessStatusCode)
+                {
+                    string errorDetail = await resp.Content.ReadAsStringAsync(); // 获取 Go 传回来的真实死因
+                    task.StatusText = "❌ 上传失败";
+
+                    Application.Current.Dispatcher.Invoke(() => {
+                        MessageBox.Show($"文件 [{task.FileName}] 上传失败！\n\n底层引擎报错信息：\n{errorDetail}", "云端拒绝请求", MessageBoxButton.OK, MessageBoxImage.Error);
+                    });
+                }
             }
             catch (TaskCanceledException) { }
             catch (OperationCanceledException) { }
-            catch (Exception) { task.StatusText = "❌ 发生异常"; }
+            catch (Exception ex) { task.StatusText = "❌ 发生异常"; }
             finally
             {
                 _taskTokens.Remove(task.TaskId);
