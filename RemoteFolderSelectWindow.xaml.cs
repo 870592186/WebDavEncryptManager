@@ -1,4 +1,6 @@
-﻿using System;
+﻿#nullable disable
+
+using System;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -7,6 +9,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
 using System.Xml.Linq;
+using Microsoft.VisualBasic; // 🌟 引入用于弹出输入框的库
 
 namespace WebDavEncryptManager
 {
@@ -79,6 +82,41 @@ namespace WebDavEncryptManager
         {
             if (ListFolders.SelectedItem is FolderItem item)
                 _ = LoadFolders(item.FullPath); // 双击进入文件夹
+        }
+
+        // ==========================================
+        // 🌟 核心新增：向 WebDAV 发送新建文件夹指令
+        // ==========================================
+        private async void BtnNewFolder_Click(object sender, RoutedEventArgs e)
+        {
+            // 弹出一个原生输入框让用户输入文件夹名
+            string folderName = Interaction.InputBox("请输入新文件夹名称:", "新建云端文件夹", "新建文件夹");
+            if (string.IsNullOrWhiteSpace(folderName)) return;
+
+            try
+            {
+                // 拼接出新文件夹的完整云端路径
+                string targetPath = currentPath.TrimEnd('/') + "/" + folderName.Trim();
+                Uri requestUri = new Uri(new Uri(config.WebDavUrl.TrimEnd('/') + "/"), targetPath.TrimStart('/'));
+
+                // 使用 MKCOL 协议命令要求服务器创建文件夹
+                var req = new HttpRequestMessage(new HttpMethod("MKCOL"), requestUri.AbsoluteUri);
+                req.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{config.Username}:{config.Password}")));
+
+                var resp = await httpClient.SendAsync(req);
+
+                // 201 Created 代表创建成功
+                if (resp.IsSuccessStatusCode || (int)resp.StatusCode == 201)
+                {
+                    // 创建成功后立刻刷新列表
+                    _ = LoadFolders(currentPath);
+                }
+                else
+                {
+                    MessageBox.Show($"新建文件夹失败，服务器返回状态码: {resp.StatusCode}");
+                }
+            }
+            catch { MessageBox.Show("新建文件夹异常，请检查网络或账号权限。"); }
         }
 
         private void BtnSelect_Click(object sender, RoutedEventArgs e)

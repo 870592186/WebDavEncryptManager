@@ -1,7 +1,7 @@
 ﻿<Window x:Class="WebDavEncryptManager.RemoteFolderSelectWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="选择目标文件夹" Height="400" Width="350" WindowStartupLocation="CenterOwner">
+        Title="选择云端目录" Height="400" Width="450" WindowStartupLocation="CenterOwner">
     <Grid Margin="10">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -9,15 +9,23 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <TextBlock x:Name="TxtCurrentPath" Text="📂 当前路径: /" FontWeight="Bold" Margin="0,0,0,10" Grid.Row="0"/>
+        <TextBlock x:Name="TxtCurrentPath" Text="📂 当前路径:" FontWeight="Bold" Grid.Row="0" Margin="0,5,0,10" Background="#F0F0F0" Padding="8"/>
 
-        <ListBox x:Name="ListFolders" Grid.Row="1" MouseDoubleClick="ListFolders_MouseDoubleClick" DisplayMemberPath="Name">
-            <!-- 仅显示文件夹名称 -->
+        <ListBox x:Name="ListFolders" Grid.Row="1" MouseDoubleClick="ListFolders_MouseDoubleClick" BorderBrush="#CCC">
+            <ListBox.ItemTemplate>
+                <DataTemplate>
+                    <TextBlock Text="{Binding Name}" Margin="2,4"/>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
         </ListBox>
 
-        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
-            <Button Content="取消" Width="70" Height="28" Margin="0,0,10,0" Click="BtnCancel_Click"/>
-            <Button Content="移动到此文件夹" Width="120" Height="28" Background="#0078D7" Foreground="White" Click="BtnSelect_Click"/>
-        </StackPanel>
+        <Grid Grid.Row="2" Margin="0,15,0,0">
+            <Button Content="➕ 新建文件夹" Click="BtnNewFolder_Click" HorizontalAlignment="Left" Padding="15,6"/>
+
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="取消" Click="BtnCancel_Click" Margin="0,0,10,0" Padding="20,6"/>
+                <Button Content="确认选择此目录" Click="BtnSelect_Click" FontWeight="Bold" Padding="20,6" Background="#E3F2FD"/>
+            </StackPanel>
+        </Grid>
     </Grid>
 </Window>
