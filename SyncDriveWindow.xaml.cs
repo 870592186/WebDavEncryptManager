@@ -6,15 +6,14 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 
-// ⚠️ 注意：这里绝对不能写 using System.Windows.Forms; ！！！
-
 namespace WebDavEncryptManager
 {
-    // 同步专属的数据模型
     public class SyncItem : INotifyPropertyChanged
     {
         public string FilePath { get; set; }
@@ -36,20 +35,18 @@ namespace WebDavEncryptManager
 
     public partial class SyncDriveWindow : Window
     {
-        // 🌟 使用绝对路径调用 WinForms 组件，完美避开冲突
         private System.Windows.Forms.NotifyIcon _trayIcon;
-
         private bool _isGlobalPaused = false;
         private string _localSyncPath = "";
         private string _remoteSyncPath = "";
-
         private FileSystemWatcher _watcher;
         private System.Windows.Threading.DispatcherTimer _debounceTimer;
 
-        // 记录文件的最后修改时间，用于 3 秒防抖
         private ConcurrentDictionary<string, DateTime> _pendingFiles = new ConcurrentDictionary<string, DateTime>();
-
         private ObservableCollection<SyncItem> SyncFiles = new ObservableCollection<SyncItem>();
+
+        // 🌟 用于控制真实同步的取消令牌
+        private ConcurrentDictionary<string, CancellationTokenSource> _syncTokens = new ConcurrentDictionary<string, CancellationTokenSource>();
 
         public SyncDriveWindow()
         {
@@ -60,20 +57,26 @@ namespace WebDavEncryptManager
             InitDebounceTimer();
         }
 
-        // ==========================================
-        // 🌟 1. 系统托盘逻辑 (System Tray)
-        // ==========================================
         private void InitSystemTray()
         {
             _trayIcon = new System.Windows.Forms.NotifyIcon();
-            _trayIcon.Icon = System.Drawing.SystemIcons.Shield; // 系统盾牌图标
+            _trayIcon.Icon = System.Drawing.SystemIcons.Shield;
             _trayIcon.Text = "WebDAV 同步盘 - 运行中";
             _trayIcon.Visible = true;
             _trayIcon.DoubleClick += (s, e) => ShowSyncWindow();
 
             var menu = new System.Windows.Forms.ContextMenuStrip();
             menu.Items.Add(new System.Windows.Forms.ToolStripMenuItem("打开同步盘", null, (s, e) => ShowSyncWindow()));
-            menu.Items.Add(new System.Windows.Forms.ToolStripMenuItem("打开主界面", null, (s, e) => { ShowSyncWindow(); BtnReturnMain_Click(null, null); }));
+            menu.Items.Add(new System.Windows.Forms.ToolStripMenuItem("打开主界面", null, (s, e) => {
+                this.Hide();
+                var mainWin = this.Owner as MainWindow;
+                if (mainWin != null)
+                {
+                    mainWin.Show();
+                    mainWin.WindowState = WindowState.Normal;
+                    mainWin.Activate();
+                }
+            }));
             menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
 
             var pauseMenu = new System.Windows.Forms.ToolStripMenuItem("暂停全部同步", null, (s, e) => ToggleGlobalSync((System.Windows.Forms.ToolStripMenuItem)s));
@@ -99,15 +102,22 @@ namespace WebDavEncryptManager
             TxtSyncStatus.Text = _isGlobalPaused ? "⏸ 全局同步已暂停" : "▶ 正在监听本地变化...";
         }
 
-        // 拦截关闭按钮，使其最小化到托盘
         protected override void OnClosing(CancelEventArgs e)
         {
             e.Cancel = true;
             this.Hide();
+            var mainWin = this.Owner as MainWindow;
+            mainWin?.Hide(); // 连带主窗口一起隐藏
             _trayIcon.ShowBalloonTip(2000, "同步盘", "已最小化至系统托盘，后台持续为您同步。", System.Windows.Forms.ToolTipIcon.Info);
         }
 
-        private void BtnMinimizeTray_Click(object sender, RoutedEventArgs e) => this.Hide();
+        private void BtnMinimizeTray_Click(object sender, RoutedEventArgs e)
+        {
+            this.Hide();
+            var mainWin = this.Owner as MainWindow;
+            mainWin?.Hide(); // 连带主窗口一起隐藏
+            _trayIcon.ShowBalloonTip(2000, "同步盘", "已最小化至系统托盘，后台持续为您同步。", System.Windows.Forms.ToolTipIcon.Info);
+        }
 
         private void BtnReturnMain_Click(object sender, RoutedEventArgs e)
         {
@@ -119,12 +129,8 @@ namespace WebDavEncryptManager
             }
         }
 
-        // ==========================================
-        // 🌟 2. 三秒防抖监听逻辑 (Debounce Watcher)
-        // ==========================================
         private void InitDebounceTimer()
         {
-            // 定时器每 1 秒巡检一次队列
             _debounceTimer = new System.Windows.Threading.DispatcherTimer();
             _debounceTimer.Interval = TimeSpan.FromSeconds(1);
             _debounceTimer.Tick += (s, e) =>
@@ -134,12 +140,10 @@ namespace WebDavEncryptManager
                 var now = DateTime.Now;
                 foreach (var kvp in _pendingFiles.ToList())
                 {
-                    // 如果该文件 3 秒内没有再被修改过，说明用户/软件保存完毕，开始触发上传！
                     if ((now - kvp.Value).TotalSeconds >= 3)
                     {
                         string targetFile = kvp.Key;
-                        _pendingFiles.TryRemove(targetFile, out _); // 从队列移除
-
+                        _pendingFiles.TryRemove(targetFile, out _);
                         Application.Current.Dispatcher.Invoke(() => StartUploadSync(targetFile));
                     }
                 }
@@ -155,14 +159,12 @@ namespace WebDavEncryptManager
 
             _watcher = new FileSystemWatcher(_localSyncPath);
             _watcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size;
-            _watcher.IncludeSubdirectories = false; // 目前仅支持单层监听
+            _watcher.IncludeSubdirectories = false;
 
             FileSystemEventHandler handler = (s, e) =>
             {
-                // 只要文件发生变动，就更新/加入队列的最后修改时间
                 _pendingFiles.AddOrUpdate(e.FullPath, DateTime.Now, (key, oldValue) => DateTime.Now);
 
-                // UI 上增加未同步的红底条目
                 Application.Current.Dispatcher.Invoke(() => {
                     if (!SyncFiles.Any(f => f.FilePath == e.FullPath))
                     {
@@ -185,9 +187,6 @@ namespace WebDavEncryptManager
             TxtSyncStatus.Text = "▶ 正在监听本地变化...";
         }
 
-        // ==========================================
-        // 🌟 3. 业务入口与模拟同步
-        // ==========================================
         private void BtnSelectLocal_Click(object sender, RoutedEventArgs e)
         {
             var dialog = new System.Windows.Forms.FolderBrowserDialog();
@@ -196,7 +195,6 @@ namespace WebDavEncryptManager
                 _localSyncPath = dialog.SelectedPath;
                 TxtLocalPath.Text = _localSyncPath;
 
-                // 首次选中，加载本地已有文件列表（默认标为已同步）
                 SyncFiles.Clear();
                 foreach (var file in Directory.GetFiles(_localSyncPath))
                 {
@@ -210,6 +208,9 @@ namespace WebDavEncryptManager
 
         private void BtnSelectRemote_Click(object sender, RoutedEventArgs e)
         {
+            var mainWin = this.Owner as MainWindow;
+            if (mainWin == null) return;
+
             MessageBox.Show(
                 "⚠️ 安全警告\n\n" +
                 "同步盘仅会自动上传本地【新增】或【修改】的文件。\n" +
@@ -218,8 +219,13 @@ namespace WebDavEncryptManager
                 "请妥善保管您的主密码！",
                 "配置确认", MessageBoxButton.OK, MessageBoxImage.Warning);
 
-            _remoteSyncPath = "/SyncFolder";
-            MessageBox.Show($"已绑定云端目录: {_remoteSyncPath}");
+            var folderWin = new RemoteFolderSelectWindow(mainWin.SyncConfig, "/");
+            folderWin.Owner = this;
+            if (folderWin.ShowDialog() == true)
+            {
+                _remoteSyncPath = folderWin.SelectedPath;
+                MessageBox.Show($"已绑定云端目录: {_remoteSyncPath}");
+            }
         }
 
         private void BtnToggleSync_Click(object sender, RoutedEventArgs e)
@@ -233,30 +239,93 @@ namespace WebDavEncryptManager
                 else
                 {
                     item.IsPaused = !item.IsPaused;
-                    item.StateText = item.IsPaused ? "⏸ 已暂停" : "正在恢复...";
+                    if (item.IsPaused)
+                    {
+                        item.StateText = "⏸ 已暂停";
+                        if (_syncTokens.TryGetValue(item.FilePath, out var cts))
+                        {
+                            cts.Cancel();
+                            _syncTokens.TryRemove(item.FilePath, out _);
+                        }
+                    }
+                    else
+                    {
+                        item.StateText = "正在恢复...";
+                        StartUploadSync(item.FilePath);
+                    }
                 }
             }
         }
 
-        // 核心上传触发点（对接你的 Go 引擎）
+        // 🌟 完美集成真实底层同步逻辑
         private async void StartUploadSync(string filePath)
         {
             var item = SyncFiles.FirstOrDefault(f => f.FilePath == filePath);
             if (item == null || item.IsPaused) return;
 
+            var mainWin = this.Owner as MainWindow;
+            if (mainWin == null || string.IsNullOrEmpty(_remoteSyncPath)) return;
+
             item.StateText = "⬆️ 正在同步...";
 
-            // UI 效果模拟
-            for (int i = 0; i <= 100; i += 10)
+            bool useEncryption = ChkEncrypt.IsChecked == true;
+            string customKey = useEncryption ? mainWin.SyncCustomKey : "";
+
+            // 🌟 如果勾选了加密但主界面没密码，拦截报错
+            if (useEncryption && string.IsNullOrEmpty(customKey))
             {
-                if (item.IsPaused) return; // 检查暂停
-                item.Percentage = i;
-                await Task.Delay(200);
+                item.StateText = "❌ 失败";
+                MessageBox.Show("您勾选了加密同步，但未在主界面填写【信封密钥】！\n请返回主界面填写密钥，或取消勾选加密同步。", "密钥缺失");
+                return;
             }
-            item.StateText = "✅ 已同步";
+
+            try
+            {
+                string fileName = Path.GetFileName(filePath);
+                string targetRemotePath = _remoteSyncPath.TrimEnd('/') + "/" + fileName;
+
+                var payload = new
+                {
+                    taskId = Guid.NewGuid().ToString(),
+                    localPath = filePath,
+                    remotePath = targetRemotePath,
+                    webdavUrl = mainWin.SyncConfig.WebDavUrl,
+                    username = mainWin.SyncConfig.Username,
+                    password = mainWin.SyncConfig.Password,
+                    customKey = customKey
+                };
+
+                var content = new StringContent(System.Text.Json.JsonSerializer.Serialize(payload), System.Text.Encoding.UTF8, "application/json");
+
+                var cts = new CancellationTokenSource();
+                _syncTokens[item.FilePath] = cts;
+
+                var resp = await mainWin.SyncHttpClient.PostAsync($"{mainWin.SyncEngineUrl}/api/upload", content, cts.Token);
+
+                if (resp.IsSuccessStatusCode)
+                {
+                    item.Percentage = 100;
+                    item.StateText = "✅ 已同步";
+                }
+                else
+                {
+                    item.StateText = "❌ 失败";
+                }
+            }
+            catch (TaskCanceledException)
+            {
+                item.StateText = "⏸ 已暂停";
+            }
+            catch (Exception)
+            {
+                item.StateText = "❌ 失败";
+            }
+            finally
+            {
+                _syncTokens.TryRemove(item.FilePath, out _);
+            }
         }
 
-        // 右侧云端右键菜单 (可直接调用 MainWindow 已有的 HandleRemoteItem 逻辑)
         private void MenuRemoteOpen_Click(object sender, RoutedEventArgs e) { }
         private void MenuRemoteRename_Click(object sender, RoutedEventArgs e) { }
         private void MenuRemoteDelete_Click(object sender, RoutedEventArgs e) { }

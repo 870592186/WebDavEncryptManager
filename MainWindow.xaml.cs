@@ -23,8 +23,6 @@ using System.ComponentModel;
 
 namespace WebDavEncryptManager
 {
-    // 🌟 已经被我彻底删除了这里的 TransferTask 类！现在它只会去读取你独立的 TransferTask.cs 文件。
-
     public partial class MainWindow : Window
     {
         private static readonly HttpClient httpClient = new HttpClient { Timeout = System.Threading.Timeout.InfiniteTimeSpan };
@@ -47,6 +45,14 @@ namespace WebDavEncryptManager
 
         private readonly string TasksSavePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tasks.json");
         private int _autoSaveTick = 0;
+
+        // ==========================================
+        // 🌟 暴露给同步盘的公共属性（不破坏封装，仅供读取）
+        // ==========================================
+        public AppConfig SyncConfig => currentConfig;
+        public string SyncCustomKey => ActualCustomKey;
+        public string SyncEngineUrl => GoEngineApiUrl;
+        public HttpClient SyncHttpClient => httpClient;
 
         public MainWindow()
         {
@@ -74,9 +80,6 @@ namespace WebDavEncryptManager
                 _ = LoadRemoteFiles("/");
         }
 
-        // ==========================================
-        // 🌟 优化：防呆机制，操作前检查密钥
-        // ==========================================
         private bool CheckCustomKeyBeforeAction()
         {
             if (string.IsNullOrEmpty(ActualCustomKey))
@@ -91,7 +94,7 @@ namespace WebDavEncryptManager
 
                 if (res == MessageBoxResult.Cancel)
                 {
-                    return false; // 用户选择了取消，中止后续的打开或下载操作
+                    return false;
                 }
             }
             return true;
@@ -136,15 +139,13 @@ namespace WebDavEncryptManager
         {
             try
             {
-                // 🌟 修复核心：在释放和启动新引擎之前，先无情斩杀后台所有残留的旧引擎进程！
-                // 防止 8888 端口被旧进程持续霸占，导致新引擎启动闪退。
                 var existingProcesses = Process.GetProcessesByName("WebDavEncryptEngine");
                 foreach (var p in existingProcesses)
                 {
                     try
                     {
                         p.Kill();
-                        p.WaitForExit(1000); // 等待进程彻底被杀死释放
+                        p.WaitForExit(1000);
                     }
                     catch { }
                 }
@@ -152,7 +153,6 @@ namespace WebDavEncryptManager
                 string tempFolder = Path.GetTempPath();
                 _extractedGoEnginePath = Path.Combine(tempFolder, "WebDavEncryptEngine.exe");
 
-                // 删除旧文件（因为上面杀死了进程，这里现在可以100%成功删除了）
                 if (File.Exists(_extractedGoEnginePath))
                 {
                     try { File.Delete(_extractedGoEnginePath); } catch { }
@@ -303,10 +303,9 @@ namespace WebDavEncryptManager
 
                 var resp = await httpClient.PostAsync($"{GoEngineApiUrl}/api/upload", content, cts.Token);
 
-                // 🌟 核心排错机制：如果底层返回失败，读取具体死因并弹窗！
                 if (!resp.IsSuccessStatusCode)
                 {
-                    string errorDetail = await resp.Content.ReadAsStringAsync(); // 获取 Go 传回来的真实死因
+                    string errorDetail = await resp.Content.ReadAsStringAsync();
                     task.StatusText = "❌ 上传失败";
 
                     Application.Current.Dispatcher.Invoke(() => {
@@ -456,7 +455,6 @@ namespace WebDavEncryptManager
 
         private void ListRemote_MouseDoubleClick(object sender, MouseButtonEventArgs e) { if (ListRemote.SelectedItem is FileItem item) HandleRemoteItem(item); }
 
-        // 🌟 拦截：打开预览时检查密钥
         private async void HandleRemoteItem(FileItem item)
         {
             if (item.IsDirectory) { await LoadRemoteFiles(item.FullPath); return; }
@@ -473,7 +471,6 @@ namespace WebDavEncryptManager
 
         private async Task PreviewRemoteFile(FileItem item) { SetProgress(true, $"正在准备预览 {item.Name}..."); try { string tempPath = Path.Combine(Path.GetTempPath(), item.Name); var payload = new { localPath = tempPath, remotePath = item.FullPath, webdavUrl = currentConfig.WebDavUrl, username = currentConfig.Username, password = currentConfig.Password, customKey = ActualCustomKey }; var resp = await httpClient.PostAsync($"{GoEngineApiUrl}/api/download", new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json")); if (resp.IsSuccessStatusCode) { Process.Start(new ProcessStartInfo { FileName = tempPath, UseShellExecute = true }); } else MessageBox.Show("解密预览失败！"); } catch (Exception ex) { MessageBox.Show($"预览异常: {ex.Message}"); } finally { SetProgress(false, "就绪"); } }
 
-        // 🌟 拦截：下载时检查密钥
         private void MenuRemoteDownload_Click(object sender, RoutedEventArgs e)
         {
             if (ListRemote.SelectedItems.Count == 0) return;
@@ -490,6 +487,18 @@ namespace WebDavEncryptManager
         private async void MenuRemoteMove_Click(object sender, RoutedEventArgs e) { if (!(ListRemote.SelectedItem is FileItem item)) return; var folderWin = new RemoteFolderSelectWindow(currentConfig, "/"); folderWin.Owner = this; if (folderWin.ShowDialog() == true) { string targetDir = folderWin.SelectedPath; if (targetDir.TrimEnd('/') == currentRemotePath.TrimEnd('/')) return; SetProgress(true, "正在移动文件..."); try { string davBase = currentConfig.WebDavUrl.TrimEnd('/'); Uri baseUri = new Uri(davBase + "/"); Uri sourceUri = new Uri(baseUri, item.FullPath.TrimStart('/')); string destRelPath = targetDir.TrimEnd('/').TrimStart('/') + "/" + item.Name.TrimStart('/'); Uri destUri = new Uri(baseUri, destRelPath); var req = new HttpRequestMessage(new HttpMethod("MOVE"), sourceUri.AbsoluteUri); req.Headers.Add("Destination", destUri.AbsoluteUri); req.Headers.Add("Overwrite", "F"); req.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{currentConfig.Username}:{currentConfig.Password}"))); var resp = await httpClient.SendAsync(req); if (resp.IsSuccessStatusCode || (int)resp.StatusCode == 201 || (int)resp.StatusCode == 204) { await LoadRemoteFiles(currentRemotePath); MessageBox.Show($"成功移动到: {targetDir}"); } else MessageBox.Show($"移动失败: {resp.StatusCode}"); } catch (Exception ex) { MessageBox.Show($"移动异常: {ex.Message}"); } finally { SetProgress(false, "就绪"); } } }
         private async void MenuRemoteDelete_Click(object sender, RoutedEventArgs e) { if (MessageBox.Show("确认要从云端彻底删除选中的文件吗？此操作不可恢复！", "删除确认", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.No) return; SetProgress(true, "正在删除..."); try { foreach (FileItem item in ListRemote.SelectedItems.Cast<FileItem>().ToList()) { string davBase = currentConfig.WebDavUrl.TrimEnd('/'); Uri deleteUri = new Uri(new Uri(davBase + "/"), item.FullPath.TrimStart('/')); var req = new HttpRequestMessage(HttpMethod.Delete, deleteUri.AbsoluteUri); req.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{currentConfig.Username}:{currentConfig.Password}"))); await httpClient.SendAsync(req); } await LoadRemoteFiles(currentRemotePath); } catch (Exception ex) { MessageBox.Show($"删除发生异常: {ex.Message}"); } finally { SetProgress(false, "就绪"); } }
         private void BtnConfirmKey_Click(object sender, RoutedEventArgs e) { if (TxtCustomKeyVisible.Visibility == Visibility.Visible) { string key = TxtCustomKeyVisible.Text.Trim(); if (string.IsNullOrEmpty(key)) return; ActualCustomKey = key; TxtCustomKeyHidden.Password = key; TxtCustomKeyVisible.Visibility = Visibility.Collapsed; TxtCustomKeyHidden.Visibility = Visibility.Visible; BtnConfirmKey.Content = "修改"; } else { TxtCustomKeyVisible.Text = ActualCustomKey; TxtCustomKeyHidden.Visibility = Visibility.Collapsed; TxtCustomKeyVisible.Visibility = Visibility.Visible; BtnConfirmKey.Content = "确定"; } }
-        private void BtnSyncDrive_Click(object sender, RoutedEventArgs e) { if (_syncDriveWindow == null || !_syncDriveWindow.IsLoaded) { _syncDriveWindow = new SyncDriveWindow(); _syncDriveWindow.Owner = this; } _syncDriveWindow.Show(); _syncDriveWindow.Activate(); }
+
+        // 🌟 打开同步盘时自动隐藏主界面
+        private void BtnSyncDrive_Click(object sender, RoutedEventArgs e)
+        {
+            if (_syncDriveWindow == null || !_syncDriveWindow.IsLoaded)
+            {
+                _syncDriveWindow = new SyncDriveWindow();
+                _syncDriveWindow.Owner = this;
+            }
+            _syncDriveWindow.Show();
+            _syncDriveWindow.Activate();
+            this.Hide();
+        }
     }
 }
