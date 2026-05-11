@@ -22,18 +22,12 @@ using System.Xml.Linq;
 
 namespace WebDavEncryptManager
 {
-    // ==========================================
-    // UI 转换器
-    // ==========================================
     public class BoolToFolderIconConverter : IValueConverter
     {
         public object Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture) => (bool)value ? "📁" : "📄";
         public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture) => null;
     }
 
-    // ==========================================
-    // 数据模型
-    // ==========================================
     public class SyncItem : INotifyPropertyChanged
     {
         public string FilePath { get; set; }
@@ -71,9 +65,6 @@ namespace WebDavEncryptManager
         public bool IsEncrypted { get; set; }
     }
 
-    // ==========================================
-    // 同步盘主逻辑
-    // ==========================================
     public partial class SyncDriveWindow : Window
     {
         private System.Windows.Forms.NotifyIcon _trayIcon;
@@ -102,7 +93,6 @@ namespace WebDavEncryptManager
         public SyncDriveWindow()
         {
             InitializeComponent();
-
             if (!this.Resources.Contains("BoolToFolderIconConverter"))
                 this.Resources.Add("BoolToFolderIconConverter", new BoolToFolderIconConverter());
 
@@ -111,7 +101,6 @@ namespace WebDavEncryptManager
 
             InitSystemTray();
             InitTimers();
-
             this.Loaded += (s, e) => LoadSyncConfig();
         }
 
@@ -144,6 +133,7 @@ namespace WebDavEncryptManager
                         {
                             LoadLocalSyncFiles();
                             _ = LoadRemoteFilesToRightSideAsync();
+                            // 🌟 修复：启动时全量重对比
                             _ = DeepScanSyncAsync();
                         }
                     }
@@ -169,7 +159,6 @@ namespace WebDavEncryptManager
             _trayIcon.Text = "WebDAV 加密同步盘";
             _trayIcon.Visible = true;
             _trayIcon.DoubleClick += (s, e) => ShowSyncWindow();
-
             var menu = new System.Windows.Forms.ContextMenuStrip();
             menu.Items.Add(new System.Windows.Forms.ToolStripMenuItem("打开同步盘", null, (s, e) => ShowSyncWindow()));
             menu.Items.Add(new System.Windows.Forms.ToolStripMenuItem("打开主界面", null, (s, e) => {
@@ -195,19 +184,8 @@ namespace WebDavEncryptManager
 
         protected override void OnClosing(CancelEventArgs e) { e.Cancel = true; MinimizeToTray(); }
         private void BtnMinimizeTray_Click(object sender, RoutedEventArgs e) { MinimizeToTray(); }
-
-        private void MinimizeToTray()
-        {
-            this.Hide();
-            var mainWin = this.Owner as MainWindow; mainWin?.Hide();
-            _trayIcon.ShowBalloonTip(2000, "同步盘", "后台持续监控同步中。", System.Windows.Forms.ToolTipIcon.Info);
-        }
-
-        private void BtnReturnMain_Click(object sender, RoutedEventArgs e)
-        {
-            this.Hide();
-            if (this.Owner != null) { this.Owner.Show(); this.Owner.Activate(); }
-        }
+        private void MinimizeToTray() { this.Hide(); var mainWin = this.Owner as MainWindow; mainWin?.Hide(); _trayIcon.ShowBalloonTip(2000, "同步盘", "后台持续监控同步中。", System.Windows.Forms.ToolTipIcon.Info); }
+        private void BtnReturnMain_Click(object sender, RoutedEventArgs e) { this.Hide(); if (this.Owner != null) { this.Owner.Show(); this.Owner.Activate(); } }
 
         private void InitTimers()
         {
@@ -216,7 +194,6 @@ namespace WebDavEncryptManager
             _debounceTimer.Tick += (s, e) =>
             {
                 if (_isGlobalPaused || string.IsNullOrEmpty(_remoteSyncRoot) || _isKeyMissingBlocked) return;
-
                 var now = DateTime.Now;
                 foreach (var kvp in _pendingFiles.ToList())
                 {
@@ -275,16 +252,10 @@ namespace WebDavEncryptManager
                 _fileProgressCache[e.FullPath] = 0;
 
                 Application.Current.Dispatcher.Invoke(() => {
-                    // 🌟 修复：改为局部更新，不再 Clear 列表，解决选中闪烁问题
                     var item = SyncFiles.FirstOrDefault(f => f.FilePath == e.FullPath);
-                    if (item != null)
-                    {
-                        item.StateText = "检测到修改...";
-                        item.Percentage = 0;
-                    }
+                    if (item != null) { item.StateText = "检测到修改..."; item.Percentage = 0; }
                     else if (Path.GetDirectoryName(e.FullPath) == _localCurrentPath)
                     {
-                        // 如果就在当前目录下，手动加入一个条目
                         var info = new FileInfo(e.FullPath);
                         SyncFiles.Add(new SyncItem { FilePath = e.FullPath, FileName = info.Name, SizeText = (info.Length / 1024) + " KB", StateText = "检测到修改...", Percentage = 0 });
                     }
@@ -293,40 +264,35 @@ namespace WebDavEncryptManager
 
             _watcher.Changed += handler;
             _watcher.Created += handler;
-            // 🌟 重点修复：加入重命名支持
-            _watcher.Renamed += (s, e) => {
-                _fileStatesCache.TryRemove(e.OldFullPath, out _);
-                _fileProgressCache.TryRemove(e.OldFullPath, out _);
-                handler(s, e);
-            };
-
+            _watcher.Renamed += (s, e) => { _fileStatesCache.TryRemove(e.OldFullPath, out _); _fileProgressCache.TryRemove(e.OldFullPath, out _); handler(s, e); };
             _watcher.EnableRaisingEvents = true;
-            if (!string.IsNullOrEmpty(_remoteSyncRoot)) TxtSyncStatus.Text = "▶ 正在监听本地变化...";
         }
 
+        // 🌟 核心修复：全量扫描递归算法
         private async Task DeepScanSyncAsync()
         {
             if (string.IsNullOrEmpty(_localSyncRoot) || string.IsNullOrEmpty(_remoteSyncRoot)) return;
-            Application.Current.Dispatcher.Invoke(() => TxtSyncStatus.Text = "🔍 正在执行全量同步比对...");
+            Application.Current.Dispatcher.Invoke(() => TxtSyncStatus.Text = "🔍 正在执行全量递归同步比对...");
 
             try
             {
-                var allFiles = Directory.GetFiles(_localSyncRoot, "*.*", SearchOption.AllDirectories);
-                foreach (var file in allFiles)
+                // 1. 获取本地所有文件（递归）
+                var allLocalFiles = Directory.GetFiles(_localSyncRoot, "*.*", SearchOption.AllDirectories);
+
+                foreach (var file in allLocalFiles)
                 {
+                    // 🌟 如果状态不是“已同步”，或者我们刚刚更换了同步盘（手动清空了缓存），则全部加入队列
                     if (!_fileStatesCache.TryGetValue(file, out var state) || state != "✅ 已同步")
                     {
-                        _fileStatesCache[file] = "等待比对...";
-                        _pendingFiles.AddOrUpdate(file, DateTime.Now.AddSeconds(-5), (k, v) => DateTime.Now.AddSeconds(-5));
+                        _fileStatesCache[file] = "正在排队...";
+                        // 强制给 3 秒倒计时，模拟“刚修改过”，触发自动上传
+                        _pendingFiles.AddOrUpdate(file, DateTime.Now.AddSeconds(-2), (k, v) => DateTime.Now.AddSeconds(-2));
                     }
                 }
 
-                Application.Current.Dispatcher.Invoke(() => {
-                    LoadLocalSyncFiles();
-                    TxtSyncStatus.Text = "▶ 同步盘正在运行";
-                });
+                Application.Current.Dispatcher.Invoke(() => { LoadLocalSyncFiles(); TxtSyncStatus.Text = "▶ 同步盘正在运行"; });
             }
-            catch (Exception ex) { Debug.WriteLine("深度扫描失败: " + ex.Message); }
+            catch { }
         }
 
         private void BtnSelectLocal_Click(object sender, RoutedEventArgs e)
@@ -337,6 +303,7 @@ namespace WebDavEncryptManager
                 _localSyncRoot = dialog.SelectedPath;
                 _localCurrentPath = _localSyncRoot;
                 TxtLocalPath.Text = _localSyncRoot;
+                _fileStatesCache.Clear(); // 🌟 切换本地根目录，必须清空缓存重新比对
                 SaveSyncConfig();
                 StartFolderWatcher();
                 LoadLocalSyncFiles();
@@ -346,9 +313,7 @@ namespace WebDavEncryptManager
 
         private void LoadLocalSyncFiles()
         {
-            // 🌟 重点：记录当前选中的项，防止刷新丢失选中
             string selectedPath = (ListLocalSync.SelectedItem as SyncItem)?.FilePath;
-
             SyncFiles.Clear();
             if (string.IsNullOrEmpty(_localCurrentPath) || !Directory.Exists(_localCurrentPath)) return;
 
@@ -362,15 +327,7 @@ namespace WebDavEncryptManager
             {
                 var info = new DirectoryInfo(dir);
                 bool allSynced = IsFolderFullySynced(dir);
-                SyncFiles.Add(new SyncItem
-                {
-                    FilePath = dir,
-                    FileName = info.Name,
-                    IsDirectory = true,
-                    SizeText = "-",
-                    StateText = allSynced ? "✅ 已同步" : "📁",
-                    Percentage = allSynced ? 100 : 0
-                });
+                SyncFiles.Add(new SyncItem { FilePath = dir, FileName = info.Name, IsDirectory = true, SizeText = "-", StateText = allSynced ? "✅ 已同步" : "📁", Percentage = allSynced ? 100 : 0 });
             }
 
             foreach (var file in Directory.GetFiles(_localCurrentPath))
@@ -381,13 +338,7 @@ namespace WebDavEncryptManager
                 SyncFiles.Add(new SyncItem { FilePath = file, FileName = info.Name, IsDirectory = false, SizeText = (info.Length / 1024) + " KB", StateText = state, Percentage = prog });
             }
 
-            // 🌟 重点：恢复选中
-            if (!string.IsNullOrEmpty(selectedPath))
-            {
-                var itemToSelect = SyncFiles.FirstOrDefault(f => f.FilePath == selectedPath);
-                if (itemToSelect != null) ListLocalSync.SelectedItem = itemToSelect;
-            }
-
+            if (!string.IsNullOrEmpty(selectedPath)) { var item = SyncFiles.FirstOrDefault(f => f.FilePath == selectedPath); if (item != null) ListLocalSync.SelectedItem = item; }
             _ = CompareCurrentLocalWithRemoteAsync();
         }
 
@@ -404,26 +355,22 @@ namespace WebDavEncryptManager
 
         private async Task CompareCurrentLocalWithRemoteAsync()
         {
-            var mainWin = this.Owner as MainWindow;
-            if (mainWin == null || string.IsNullOrEmpty(_remoteSyncRoot)) return;
-
+            var mainWin = this.Owner as MainWindow; if (mainWin == null || string.IsNullOrEmpty(_remoteSyncRoot)) return;
             try
             {
-                string relPath = _localCurrentPath.Substring(_localSyncRoot.Length).TrimStart('\\').Replace("\\", "/");
+                string relPath = Path.GetRelativePath(_localSyncRoot, _localCurrentPath).Replace("\\", "/");
+                if (relPath == ".") relPath = "";
                 string targetRemoteDir = _remoteSyncRoot.TrimEnd('/') + (string.IsNullOrEmpty(relPath) ? "" : "/" + relPath);
-
                 Uri requestUri = new Uri(new Uri(mainWin.SyncConfig.WebDavUrl.TrimEnd('/') + "/"), targetRemoteDir.TrimStart('/'));
                 var req = new HttpRequestMessage(new HttpMethod("PROPFIND"), requestUri.AbsoluteUri);
                 req.Headers.Add("Depth", "1");
                 req.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{mainWin.SyncConfig.Username}:{mainWin.SyncConfig.Password}")));
-
                 var resp = await mainWin.SyncHttpClient.SendAsync(req);
                 if (resp.IsSuccessStatusCode || (int)resp.StatusCode == 207)
                 {
                     string xml = await resp.Content.ReadAsStringAsync();
                     XDocument doc = XDocument.Parse(xml); XNamespace ns = "DAV:";
                     var remoteFileNames = doc.Descendants(ns + "response").Select(res => Uri.UnescapeDataString(res.Element(ns + "href")?.Value ?? "").TrimEnd('/').Split('/').Last()).ToList();
-
                     Application.Current.Dispatcher.Invoke(() => {
                         foreach (var localItem in SyncFiles.Where(f => !f.IsDirectory))
                         {
@@ -433,12 +380,10 @@ namespace WebDavEncryptManager
                             _fileStatesCache[localItem.FilePath] = localItem.StateText;
                             _fileProgressCache[localItem.FilePath] = localItem.Percentage;
                         }
-                        // 更新文件夹状态 (原地更新属性，不 Clear 列表)
-                        foreach (var folderItem in SyncFiles.Where(f => f.IsDirectory && f.FileName != ".."))
+                        foreach (var folder in SyncFiles.Where(f => f.IsDirectory && f.FileName != ".."))
                         {
-                            bool fully = IsFolderFullySynced(folderItem.FilePath);
-                            folderItem.StateText = fully ? "✅ 已同步" : "📁";
-                            folderItem.Percentage = fully ? 100 : 0;
+                            bool fully = IsFolderFullySynced(folder.FilePath);
+                            folder.StateText = fully ? "✅ 已同步" : "📁"; folder.Percentage = fully ? 100 : 0;
                         }
                     });
                 }
@@ -446,15 +391,7 @@ namespace WebDavEncryptManager
             catch { }
         }
 
-        private void ListLocalSync_MouseDoubleClick(object sender, MouseButtonEventArgs e)
-        {
-            if (ListLocalSync.SelectedItem is SyncItem item && item.IsDirectory)
-            {
-                _localCurrentPath = item.FilePath;
-                TxtLocalPath.Text = _localCurrentPath;
-                LoadLocalSyncFiles();
-            }
-        }
+        private void ListLocalSync_MouseDoubleClick(object sender, MouseButtonEventArgs e) { if (ListLocalSync.SelectedItem is SyncItem item && item.IsDirectory) { _localCurrentPath = item.FilePath; TxtLocalPath.Text = _localCurrentPath; LoadLocalSyncFiles(); } }
 
         private void BtnSelectRemote_Click(object sender, RoutedEventArgs e)
         {
@@ -466,6 +403,7 @@ namespace WebDavEncryptManager
                 _remoteSyncRoot = folderWin.SelectedPath;
                 _remoteCurrentPath = _remoteSyncRoot;
                 TxtRemotePath.Text = _remoteSyncRoot;
+                _fileStatesCache.Clear(); // 🌟 重点修复：更换云端同步盘，必须清空缓存强制重传/比对
                 SaveSyncConfig();
                 _ = LoadRemoteFilesToRightSideAsync();
                 LoadLocalSyncFiles();
@@ -475,8 +413,7 @@ namespace WebDavEncryptManager
 
         private async Task LoadRemoteFilesToRightSideAsync()
         {
-            var mainWin = this.Owner as MainWindow;
-            if (mainWin == null || string.IsNullOrEmpty(_remoteCurrentPath)) return;
+            var mainWin = this.Owner as MainWindow; if (mainWin == null || string.IsNullOrEmpty(_remoteCurrentPath)) return;
             try
             {
                 string davBase = mainWin.SyncConfig.WebDavUrl.TrimEnd('/');
@@ -484,7 +421,6 @@ namespace WebDavEncryptManager
                 var req = new HttpRequestMessage(new HttpMethod("PROPFIND"), requestUri.AbsoluteUri);
                 req.Headers.Add("Depth", "1");
                 req.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{mainWin.SyncConfig.Username}:{mainWin.SyncConfig.Password}")));
-
                 var resp = await mainWin.SyncHttpClient.SendAsync(req);
                 if (resp.IsSuccessStatusCode || (int)resp.StatusCode == 207)
                 {
@@ -497,7 +433,6 @@ namespace WebDavEncryptManager
                         if (string.IsNullOrEmpty(p)) p = "/";
                         tempList.Add(new RemoteSyncFile { Name = "..", FullPath = p, IsDirectory = true });
                     }
-
                     foreach (var res in doc.Descendants(ns + "response"))
                     {
                         string href = Uri.UnescapeDataString(res.Element(ns + "href")?.Value ?? "");
@@ -507,22 +442,13 @@ namespace WebDavEncryptManager
                         if (relPath.TrimEnd('/') == _remoteCurrentPath.TrimEnd('/')) continue;
                         tempList.Add(new RemoteSyncFile { Name = relPath.TrimEnd('/').Split('/').Last(), FullPath = relPath, IsDirectory = res.Descendants(ns + "collection").Any() });
                     }
-                    Application.Current.Dispatcher.Invoke(() => {
-                        RemoteFiles.Clear(); foreach (var item in tempList) RemoteFiles.Add(item);
-                    });
+                    Application.Current.Dispatcher.Invoke(() => { RemoteFiles.Clear(); foreach (var item in tempList) RemoteFiles.Add(item); });
                 }
             }
             catch { }
         }
 
-        private async void ListRemoteSync_MouseDoubleClick(object sender, MouseButtonEventArgs e)
-        {
-            if (ListRemoteSync.SelectedItem is RemoteSyncFile item && item.IsDirectory)
-            {
-                _remoteCurrentPath = item.FullPath;
-                await LoadRemoteFilesToRightSideAsync();
-            }
-        }
+        private async void ListRemoteSync_MouseDoubleClick(object sender, MouseButtonEventArgs e) { if (ListRemoteSync.SelectedItem is RemoteSyncFile item && item.IsDirectory) { _remoteCurrentPath = item.FullPath; await LoadRemoteFilesToRightSideAsync(); } }
 
         private void BtnToggleSync_Click(object sender, RoutedEventArgs e)
         {
@@ -535,6 +461,7 @@ namespace WebDavEncryptManager
             }
         }
 
+        // 🌟 核心函数：上传与递归创建云端目录
         private async void StartUploadSync(string filePath)
         {
             var itemInView = SyncFiles.FirstOrDefault(f => f.FilePath == filePath);
@@ -545,7 +472,6 @@ namespace WebDavEncryptManager
 
             bool useEncryption = ChkEncrypt.IsChecked == true;
             string customKey = useEncryption ? mainWin.SyncCustomKey : "";
-
             if (useEncryption && string.IsNullOrEmpty(customKey))
             {
                 if (!_isKeyMissingBlocked) { _isKeyMissingBlocked = true; MessageBox.Show("启用了加密但无密钥！同步已拦截。"); }
@@ -560,24 +486,28 @@ namespace WebDavEncryptManager
 
             try
             {
-                string relPath = filePath.Substring(_localSyncRoot.Length).TrimStart('\\').Replace("\\", "/");
-                string targetRemotePath = _remoteSyncRoot.TrimEnd('/') + "/" + relPath;
+                // 1. 计算相对路径
+                string relativePath = Path.GetRelativePath(_localSyncRoot, filePath).Replace("\\", "/");
+                string targetRemotePath = _remoteSyncRoot.TrimEnd('/') + "/" + relativePath;
 
-                string[] folders = relPath.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
-                string currentPath = _remoteSyncRoot.TrimEnd('/');
-                for (int i = 0; i < folders.Length - 1; i++)
+                // 2. 🌟 重点：递归创建父目录
+                string[] parts = relativePath.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+                string currentRemoteBuild = _remoteSyncRoot.TrimEnd('/');
+                for (int i = 0; i < parts.Length - 1; i++) // 循环到倒数第二个（即父文件夹）
                 {
-                    currentPath += "/" + folders[i];
+                    currentRemoteBuild += "/" + parts[i];
                     try
                     {
-                        Uri mkUri = new Uri(new Uri(mainWin.SyncConfig.WebDavUrl.TrimEnd('/') + "/"), currentPath.TrimStart('/'));
+                        Uri mkUri = new Uri(new Uri(mainWin.SyncConfig.WebDavUrl.TrimEnd('/') + "/"), currentRemoteBuild.TrimStart('/'));
                         var mkReq = new HttpRequestMessage(new HttpMethod("MKCOL"), mkUri.AbsoluteUri);
                         mkReq.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{mainWin.SyncConfig.Username}:{mainWin.SyncConfig.Password}")));
-                        await mainWin.SyncHttpClient.SendAsync(mkReq);
+                        var mkResp = await mainWin.SyncHttpClient.SendAsync(mkReq);
+                        // 405 Method Not Allowed 通常意味着目录已存在，忽略即可
                     }
                     catch { }
                 }
 
+                // 3. 开始真实上传
                 var payload = new { taskId = taskId, localPath = filePath, remotePath = targetRemotePath, webdavUrl = mainWin.SyncConfig.WebDavUrl, username = mainWin.SyncConfig.Username, password = mainWin.SyncConfig.Password, customKey = customKey };
                 var cts = new CancellationTokenSource(); _syncTokens[filePath] = cts;
                 var resp = await mainWin.SyncHttpClient.PostAsync($"{mainWin.SyncEngineUrl}/api/upload", new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json"), cts.Token);
@@ -586,16 +516,12 @@ namespace WebDavEncryptManager
                 {
                     _fileStatesCache[filePath] = "✅ 已同步"; _fileProgressCache[filePath] = 100;
                     Application.Current.Dispatcher.Invoke(() => {
-                        // 原地更新 UI 状态，不刷新列表
                         if (itemInView != null) { itemInView.StateText = "✅ 已同步"; itemInView.Percentage = 100; }
-
-                        // 🌟 核心修复：更新父文件夹颜色 (不刷新整个列表)
-                        foreach (var folder in SyncFiles.Where(f => f.IsDirectory && f.FileName != ".."))
+                        // 🌟 上传完一个文件，必须遍历刷新当前视图中的文件夹状态，让文件夹“变绿”
+                        foreach (var f in SyncFiles.Where(x => x.IsDirectory && x.FileName != ".."))
                         {
-                            if (IsFolderFullySynced(folder.FilePath)) { folder.StateText = "✅ 已同步"; folder.Percentage = 100; }
+                            if (IsFolderFullySynced(f.FilePath)) { f.StateText = "✅ 已同步"; f.Percentage = 100; }
                         }
-
-                        // 🌟 核心修复：如果云端正好在看这个目录，自动刷新云端列表
                         string remoteParent = targetRemotePath.Substring(0, targetRemotePath.LastIndexOf('/'));
                         if (string.IsNullOrEmpty(remoteParent)) remoteParent = "/";
                         if (_remoteCurrentPath.TrimEnd('/') == remoteParent.TrimEnd('/')) _ = LoadRemoteFilesToRightSideAsync();
